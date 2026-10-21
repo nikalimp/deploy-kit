@@ -1,0 +1,233 @@
+# deploy-kit — общий сценарий выкладки всех сайтов Ника (reusable workflow).
+# Живёт в репозитории nikalimp/deploy-kit, тег v1. Проекты вызывают его из своего .github/workflows/deploy.yml.
+# Стандарт — «Публикация — стандарт» и «Хостинги — что проверено» (NikitOS).
+#
+# Адаптер по умолчанию — ssh-ftp: три пути выкладки по убыванию.
+#   1. SSH (rsync)  — шаг id: ssh, continue-on-error. Одно соединение на попытку, 2 попытки.
+#   2. FTP          — только если SSH не прошёл. SamKirkland/FTP-Deploy-Action, protocol ftp, без clean-slate.
+#   3. Вручную с Mac — scripts/deploy-<app>.sh (rsync по SSH с ключом ~/.ssh/<project>_deploy).
+#      Сборка всегда лежит артефактом workflow (site-build) — её можно скачать.
+# Workflow падает, только если не сработали SSH и FTP. Последний шаг — сайт отвечает 200.
+# Другие адаптеры: ftp (только FTP), s3 (Yandex Object Storage и любой S3), manual-zip, tilda.
+#
+# Доступ из других репозиториев: deploy-kit → Settings → Actions → General → Access →
+# «Accessible from repositories owned by the user».
+name: site
+
+on:
+  workflow_call:
+    inputs:
+      adapter:       { type: string, default: "ssh-ftp" }  # ssh-ftp | ftp | s3 | manual-zip | tilda (ssh-rsync = ssh-ftp)
+      site_dir:      { type: string, default: "." }        # папка приложения в репозитории (монорепо: apps/site)
+      out_dir:       { type: string, default: "out" }      # папка сборки внутри site_dir (Next.js export — out, Vite — dist)
+      app_path:      { type: string, default: "" }         # подпапка на сервере внутри SITE_DIR / FTP_DIR, со слешем: "test/app/"
+      rsync_exclude: { type: string, default: "" }         # подпапки других приложений, которые выкладка не трогает: "test/ blog-old/"
+      url:           { type: string, default: "" }         # адрес сайта для проверки (без app_path)
+      media_brand:   { type: string, default: "content/factory/brand.json" }
+      noindex:       { type: string, default: "" }         # "1" — тестовая выкладка, закрыта от индексации
+      node_version:  { type: string, default: "22" }
+      build_command: { type: string, default: "" }         # пусто — npm run check, если он есть, иначе npm run build
+    secrets:
+      SSH_KEY: { required: false }
+      SSH_HOST: { required: false }
+      SSH_USER: { required: false }
+      SITE_DIR: { required: false }          # абсолютный путь, со слешем: /var/www/uXXXX/data/www/<домен>/
+      SSH_KNOWN_HOSTS: { required: false }
+      FTP_HOST: { required: false }
+      FTP_USER: { required: false }
+      FTP_PASS: { required: false }
+      FTP_DIR: { required: false }           # относительно корня FTP, со слешем. REG.RU (основной аккаунт): www/<домен>/
+      S3_BUCKET: { required: false }
+      S3_ACCESS_KEY_ID: { required: false }
+      S3_SECRET_ACCESS_KEY: { required: false }
+      S3_ENDPOINT: { required: false }       # по умолчанию https://storage.yandexcloud.net
+      S3_REGION: { required: false }         # по умолчанию ru-central1
+      TELEGRAM_BOT_TOKEN: { required: false }
+      TELEGRAM_CHAT_ID: { required: false }
+      TELEGRAPH_TOKEN: { required: false }
+      MAX_BOT_TOKEN: { required: false }
+      MAX_CHAT_ID: { required: false }
+      NOTIFY_BOT_TOKEN: { required: false }  # бот Ника для сообщений об ошибках выкладки
+      NOTIFY_CHAT_ID: { required: false }
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    env:
+      NOINDEX: ${{ inputs.noindex }}
+      MEDIA_BRAND: ${{ inputs.media_brand }}
+      SSH_FIRST: ${{ inputs.adapter == 'ssh-ftp' || inputs.adapter == 'ssh-rsync' }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.site_dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 50 }
+
+      - name: Tilda — выкладку делает Tilda MCP
+        if: inputs.adapter == 'tilda'
+        run: echo "Адаптер tilda — статьи хранятся в git, выпуск в поток Tilda делает задача через Tilda MCP. Сборки нет."
+
+      - uses: actions/setup-node@v5
+        if: inputs.adapter != 'tilda'
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.site_dir }}/package-lock.json
+
+      - if: inputs.adapter != 'tilda'
+        run: npm ci
+
+      - name: Медиа статей (обложки, скриншоты, инфографика)
+        if: inputs.adapter != 'tilda'
+        run: |
+          if [ -f scripts/media.mjs ] && ls content/media/*.json 2>/dev/null | grep -qv "channels.json"; then
+            npx playwright install --with-deps chromium
+            node scripts/media.mjs --brand "$MEDIA_BRAND"
+          else
+            echo "Нет медиа статей — пропускаю"
+          fi
+
+      - name: Проверка и сборка
+        if: inputs.adapter != 'tilda'
+        env:
+          BUILD: ${{ inputs.build_command }}
+        run: |
+          if [ -n "$BUILD" ]; then eval "$BUILD"
+          elif npm run | grep -q "^  check$"; then npm run check
+          else npm run build; fi
+
+      - name: IndexNow — что изменилось
+        if: inputs.adapter != 'tilda'
+        run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs prepare || echo "нет indexnow.mjs"'
+
+      # Сборка всегда доступна артефактом — для ручной выкладки (план 3) и для manual-zip
+      - uses: actions/upload-artifact@v4
+        if: inputs.adapter != 'tilda'
+        with:
+          name: site-build
+          path: ${{ inputs.site_dir }}/${{ inputs.out_dir }}
+          retention-days: 7
+
+      # ── 1. SSH (rsync). REG.RU обрывает частые подключения с одного IP: без ssh-keyscan и пробного входа,
+      #       ровно одно соединение на попытку. Не прошло — предупреждение и выход 1, дальше FTP.
+      - name: Выкладка — SSH (rsync)
+        id: ssh
+        if: env.SSH_FIRST == 'true'
+        continue-on-error: true
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SITE_DIR: ${{ secrets.SITE_DIR }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          APP_PATH: ${{ inputs.app_path }}
+          EXCLUDE: ${{ inputs.rsync_exclude }}
+          OUT: ${{ inputs.out_dir }}
+        run: |
+          [ -z "$SSH_KEY" ] || [ -z "$SITE_DIR" ] && { echo "::warning::Нет SSH_KEY или SITE_DIR — пробуем FTP"; exit 1; }
+          mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          [ -n "$SSH_KNOWN_HOSTS" ] && echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          DEST="${SITE_DIR%/}/${APP_PATH}"
+          EX=(--exclude '.well-known/' --exclude 'cgi-bin/' --exclude '.ftp-deploy-sync-state.json')
+          for d in $EXCLUDE; do EX+=(--exclude "$d"); done
+          SSH="ssh -i ~/.ssh/deploy_key -o ConnectTimeout=25 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15"
+          for i in 1 2; do
+            # --delete действует только внутри DEST: подпапки других приложений защищены --exclude
+            rsync -az --delete --stats "${EX[@]}" --rsync-path="mkdir -p '$DEST' && rsync" -e "$SSH" "$OUT/" "$SSH_USER@$SSH_HOST:$DEST" && exit 0
+            echo "SSH: попытка $i не прошла"; [ $i -lt 2 ] && sleep 20
+          done
+          echo "::warning::SSH до $SSH_HOST не прошёл (REG.RU закрывает порт 22 для IP GitHub Actions) — пробуем FTP"
+          exit 1
+
+      # ── 2. FTP: если SSH не прошёл (ssh-ftp) или адаптер ftp. Не очищает сервер целиком (dangerous-clean-slate: false):
+      #       .ftp-deploy-sync-state.json на сервере хранит, что уже залито, — дальше переносится только изменённое.
+      - name: Выкладка — FTP
+        if: inputs.adapter == 'ftp' || (env.SSH_FIRST == 'true' && steps.ssh.outcome == 'failure')
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASS }}
+          protocol: ftp
+          local-dir: ${{ inputs.site_dir }}/${{ inputs.out_dir }}/
+          server-dir: ${{ secrets.FTP_DIR }}${{ inputs.app_path }}
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            .well-known/**
+            cgi-bin/**
+
+      - name: Выкладка — s3 (Yandex Object Storage)
+        if: inputs.adapter == 's3'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.S3_REGION || 'ru-central1' }}
+          ENDPOINT: ${{ secrets.S3_ENDPOINT || 'https://storage.yandexcloud.net' }}
+          BUCKET: ${{ secrets.S3_BUCKET }}
+          OUT: ${{ inputs.out_dir }}
+          APP_PATH: ${{ inputs.app_path }}
+        run: |
+          [ -z "$BUCKET" ] && { echo "::error::Нет секрета S3_BUCKET"; exit 1; }
+          # HTML — короткий кэш, остальное — год (имена файлов сборки содержат хэш)
+          aws s3 sync "$OUT/" "s3://$BUCKET/$APP_PATH" --endpoint-url "$ENDPOINT" --delete --exclude "*.html" --cache-control "public,max-age=31536000,immutable"
+          aws s3 sync "$OUT/" "s3://$BUCKET/$APP_PATH" --endpoint-url "$ENDPOINT" --delete --exclude "*" --include "*.html" --cache-control "public,max-age=300"
+
+      - name: manual-zip — сборка в артефакте site-build
+        if: inputs.adapter == 'manual-zip'
+        run: echo "Скачай артефакт site-build в этом запуске и залей в панель хостинга (или scripts/deploy-<app>.sh с Mac)."
+
+      - name: Сайт отвечает
+        if: inputs.url != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        env:
+          URL: ${{ inputs.url }}
+          APP_PATH: ${{ inputs.app_path }}
+        run: |
+          U="${URL%/}/${APP_PATH}"
+          for i in 1 2 3; do
+            code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 20 "$U" || true)
+            echo "$U: $code"; [ "$code" = "200" ] && exit 0; sleep 10
+          done
+          echo "::error::Сайт ответил $code"; exit 1
+
+      - name: IndexNow — отправить
+        if: env.NOINDEX != '1' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        continue-on-error: true
+        run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs submit || true'
+
+      - name: Telegram и Max
+        if: env.NOINDEX != '1' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
+          MAX_BOT_TOKEN: ${{ secrets.MAX_BOT_TOKEN }}
+          MAX_CHAT_ID: ${{ secrets.MAX_CHAT_ID }}
+        run: '[ -f scripts/channels.mjs ] && node scripts/channels.mjs --brand "$MEDIA_BRAND" || true'
+
+      - name: Сохранить сгенерированные файлы
+        if: inputs.adapter != 'tilda'
+        continue-on-error: true
+        run: |
+          git add public/blog content/media 2>/dev/null || true
+          if git diff --cached --quiet; then echo "Нечего сохранять"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git commit -m "медиа и каналы блога [skip ci]"
+          for i in 1 2 3; do git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push && break; sleep 5; done
+
+      - name: Сообщить Нику об ошибке
+        if: failure()
+        env:
+          T: ${{ secrets.NOTIFY_BOT_TOKEN }}
+          C: ${{ secrets.NOTIFY_CHAT_ID }}
+        run: |
+          [ -z "$T" ] && exit 0
+          curl -s "https://api.telegram.org/bot$T/sendMessage" -d chat_id="$C" \
+            --data-urlencode text="❌ Выкладка упала (SSH и FTP): ${GITHUB_REPOSITORY} — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Сборка — артефакт site-build, план 3 — scripts/deploy-*.sh с Mac." >/dev/null
