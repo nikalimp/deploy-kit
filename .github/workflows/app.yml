@@ -1,0 +1,251 @@
+# deploy-kit — общий сценарий выкладки веб-сервисов и админок Ника (reusable workflow).
+# Живёт в nikalimp/deploy-kit, тег v1. Проект вызывает его из .github/workflows/deploy.yml (шаблон — deploy-app.yml).
+# Стандарт — «Веб-сервис — стандарт» §«Выкладка», «Юрисдикция и стек», «Публикация — стандарт» (NikitOS).
+#
+# Порядок: проверки (npm run check или test) → образ Docker собирается в Actions → реестр → выкладка → /api/health → откат.
+# Адаптеры:
+#   vps-compose  — VPS в РФ или за рубежом: по SSH docker compose pull, миграции, up -d. Откат на прошлый образ, если health не 200.
+#   yc-container — Yandex Serverless Containers: новая ревизия контейнера. Старые ревизии остаются, откат — вручную (команда в логе).
+#   platform     — платформа сама собирает из GitHub (Timeweb Apps, Vercel Git): сценарий только проверяет и ждёт health.
+# Реестр образов: ghcr (GitHub, по умолчанию) или yandex (Yandex Container Registry, cr.yandex).
+# Секреты приложения (DATABASE_URL, ключи оплаты) не идут через git:
+#   vps-compose — файл .env в APP_DIR на сервере, его кладёт Ник (web:wizard); yc-container — секрет APP_ENV.
+#
+# Вызывающий workflow даёт job права: permissions: { contents: read, packages: write }.
+name: app
+
+on:
+  workflow_call:
+    inputs:
+      adapter:         { type: string, default: "vps-compose" } # vps-compose | yc-container | platform
+      app_dir:         { type: string, default: "." }           # папка приложения в репозитории (монорепо: apps/admin)
+      dockerfile:      { type: string, default: "Dockerfile" }  # от app_dir
+      image_name:      { type: string, default: "" }            # пусто — имя репозитория
+      registry:        { type: string, default: "ghcr" }        # ghcr | yandex
+      compose_file:    { type: string, default: "deploy/compose.yml" } # от app_dir, только vps-compose
+      service:         { type: string, default: "app" }         # сервис в compose для миграций
+      migrate_command: { type: string, default: "" }            # например: npx prisma migrate deploy (пусто — без миграций)
+      check_command:   { type: string, default: "" }            # пусто — npm run check, если есть, иначе npm test, если есть
+      node_version:    { type: string, default: "22" }
+      url:             { type: string, default: "" }            # адрес сервиса
+      health_path:     { type: string, default: "/api/health" } # отвечает 200, когда приложение и база живы
+      yc_container:    { type: string, default: "" }            # имя Serverless Container
+      yc_resources:    { type: string, default: "--cores 1 --memory 512MB --concurrency 8 --execution-timeout 30s" }
+    secrets:
+      SSH_KEY: { required: false }
+      SSH_HOST: { required: false }
+      SSH_USER: { required: false }
+      APP_DIR: { required: false }            # абсолютный путь на сервере: /srv/<проект>/
+      SSH_KNOWN_HOSTS: { required: false }
+      YC_SA_KEY: { required: false }          # JSON авторизованного ключа сервисного аккаунта
+      YC_REGISTRY_ID: { required: false }     # id реестра cr.yandex/<id>
+      YC_FOLDER_ID: { required: false }
+      YC_SERVICE_ACCOUNT_ID: { required: false } # от имени кого работает контейнер (pull образа, Lockbox)
+      APP_ENV: { required: false }            # yc-container: строки KEY=VALUE, без запятых в значениях
+      NOTIFY_BOT_TOKEN: { required: false }
+      NOTIFY_CHAT_ID: { required: false }
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.app_dir }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # ── Проверки: тот же набор, что и перед PR (lint, typecheck, тесты)
+      - uses: actions/setup-node@v5
+        if: hashFiles(format('{0}/package-lock.json', inputs.app_dir)) != ''
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.app_dir }}/package-lock.json
+
+      - name: Проверки
+        if: hashFiles(format('{0}/package-lock.json', inputs.app_dir)) != ''
+        env:
+          CHECK: ${{ inputs.check_command }}
+        run: |
+          npm ci
+          if [ -n "$CHECK" ]; then eval "$CHECK"
+          elif npm run | grep -q "^  check$"; then npm run check
+          elif npm run | grep -q "^  test$"; then npm test
+          else echo "Нет check и test — пропускаю"; fi
+
+      - name: Сервис отвечает (platform)
+        if: inputs.adapter == 'platform'
+        env:
+          URL: ${{ inputs.url }}
+          U: ${{ inputs.url }}${{ inputs.health_path }}
+        run: |
+          [ -z "$URL" ] && { echo "::error::Нет input url"; exit 1; }
+          echo "Платформа выкладывает сама. Жду $U до 10 минут."
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 15 "$U" || true)
+            echo "$i: $code"; [ "$code" = "200" ] && exit 0; sleep 20
+          done
+          echo "::error::$U не ответил 200"; exit 1
+
+      # ── Образ
+      - name: Имя образа
+        id: img
+        if: inputs.adapter != 'platform'
+        env:
+          REG: ${{ inputs.registry }}
+          NAME: ${{ inputs.image_name }}
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          name="${NAME:-${GITHUB_REPOSITORY#*/}}"
+          if [ "$REG" = "yandex" ]; then
+            [ -z "$YC_REGISTRY_ID" ] && { echo "::error::Нет секрета YC_REGISTRY_ID"; exit 1; }
+            base="cr.yandex/$YC_REGISTRY_ID/$name"
+          else
+            base="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "image=$base:${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Вход в реестр — ghcr
+        if: inputs.adapter != 'platform' && inputs.registry != 'yandex'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Вход в реестр — Yandex
+        if: inputs.adapter != 'platform' && inputs.registry == 'yandex'
+        env:
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+        run: |
+          [ -z "$YC_SA_KEY" ] && { echo "::error::Нет секрета YC_SA_KEY"; exit 1; }
+          echo "$YC_SA_KEY" | docker login cr.yandex -u json_key --password-stdin
+
+      - name: Сборка и отправка образа
+        if: inputs.adapter != 'platform'
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          BASE: ${{ steps.img.outputs.base }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          docker build -f "$DOCKERFILE" -t "$IMAGE" -t "$BASE:latest" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" .
+          docker push "$IMAGE"
+          docker push "$BASE:latest"
+
+      # ── vps-compose
+      - name: Выкладка — VPS (docker compose)
+        id: vps
+        if: inputs.adapter == 'vps-compose'
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          IMAGE: ${{ steps.img.outputs.image }}
+          COMPOSE: ${{ inputs.compose_file }}
+          SERVICE: ${{ inputs.service }}
+          MIGRATE: ${{ inputs.migrate_command }}
+          REG: ${{ inputs.registry }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+        run: |
+          for v in SSH_KEY SSH_HOST SSH_USER APP_DIR; do [ -z "${!v}" ] && { echo "::error::Нет секрета $v"; exit 1; }; done
+          [ -f "$COMPOSE" ] || { echo "::error::Нет $COMPOSE (шаблон — deploy-kit/compose.yml)"; exit 1; }
+          mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          [ -n "$SSH_KNOWN_HOSTS" ] && echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          SSH=(ssh -i ~/.ssh/deploy_key -o ConnectTimeout=25 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST")
+          D="${APP_DIR%/}"
+          "${SSH[@]}" "mkdir -p '$D' && cat > '$D/compose.yml'" < "$COMPOSE"
+          # Вход сервера в реестр: ghcr — временный токен этого запуска, yandex — ключ сервисного аккаунта
+          if [ "$REG" = "yandex" ]; then echo "$YC_SA_KEY" | "${SSH[@]}" "docker login cr.yandex -u json_key --password-stdin"
+          else echo "$GH_TOKEN" | "${SSH[@]}" "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"; fi
+          prev=$("${SSH[@]}" "cat '$D/.image' 2>/dev/null" || true)
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
+          "${SSH[@]}" "cd '$D' && [ -f .env ] || { echo 'Нет $D/.env — его кладёт Ник (web:wizard)'; exit 1; }"
+          "${SSH[@]}" "cd '$D' && export IMAGE='$IMAGE' && docker compose pull"
+          if [ -n "$MIGRATE" ]; then
+            "${SSH[@]}" "cd '$D' && export IMAGE='$IMAGE' && docker compose run --rm '$SERVICE' sh -c \"$MIGRATE\""
+          fi
+          "${SSH[@]}" "cd '$D' && export IMAGE='$IMAGE' && docker compose up -d --remove-orphans && docker image prune -f >/dev/null"
+
+      # ── yc-container
+      - name: Выкладка — Yandex Serverless Containers
+        if: inputs.adapter == 'yc-container'
+        env:
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+          SA_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          APP_ENV: ${{ secrets.APP_ENV }}
+          IMAGE: ${{ steps.img.outputs.image }}
+          NAME: ${{ inputs.yc_container }}
+          RES: ${{ inputs.yc_resources }}
+          MIGRATE: ${{ inputs.migrate_command }}
+        run: |
+          for v in YC_SA_KEY YC_FOLDER_ID SA_ID NAME; do [ -z "${!v}" ] && { echo "::error::Нет $v (секрет или input yc_container)"; exit 1; }; done
+          printf '%s\n' "$APP_ENV" | sed '/^\s*$/d' > /tmp/app.env
+          if [ -n "$MIGRATE" ]; then docker run --rm --env-file /tmp/app.env "$IMAGE" sh -c "$MIGRATE"; fi
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /opt/yc -n
+          export PATH=/opt/yc/bin:$PATH
+          echo "$YC_SA_KEY" > /tmp/key.json
+          yc config set service-account-key /tmp/key.json && yc config set folder-id "$YC_FOLDER_ID"
+          ENVS=$(paste -sd, /tmp/app.env)
+          # shellcheck disable=SC2086
+          yc serverless container revision deploy --container-name "$NAME" --image "$IMAGE" \
+            --service-account-id "$SA_ID" $RES ${ENVS:+--environment "$ENVS"}
+          rm -f /tmp/key.json /tmp/app.env
+          echo "Откат: yc serverless container revision list --container-name $NAME, затем revision deploy с прошлым образом."
+
+      # ── Проверка и откат
+      - name: Сервис отвечает
+        id: health
+        if: inputs.adapter != 'platform' && inputs.url != ''
+        continue-on-error: true
+        env:
+          U: ${{ inputs.url }}${{ inputs.health_path }}
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 15 "$U" || true)
+            echo "$U: $code"; [ "$code" = "200" ] && exit 0; sleep 10
+          done
+          echo "::error::$U ответил $code"; exit 1
+
+      - name: Запомнить образ (VPS)
+        if: inputs.adapter == 'vps-compose' && steps.health.outcome != 'failure'
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+          IMAGE: ${{ steps.img.outputs.image }}
+        run: ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$SSH_USER@$SSH_HOST" "echo '$IMAGE' > '${APP_DIR%/}/.image'"
+
+      - name: Откат (VPS)
+        if: inputs.adapter == 'vps-compose' && steps.health.outcome == 'failure'
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+          PREV: ${{ steps.vps.outputs.prev }}
+        run: |
+          [ -z "$PREV" ] && { echo "::error::Прошлого образа нет — откатывать некуда"; exit 1; }
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$SSH_USER@$SSH_HOST" "cd '${APP_DIR%/}' && export IMAGE='$PREV' && docker compose up -d --remove-orphans"
+          echo "::error::Новая версия не прошла health — вернул $PREV. Миграции базы не откатываются: проверь их вручную."
+          exit 1
+
+      - name: Health не прошёл
+        if: steps.health.outcome == 'failure' && inputs.adapter != 'vps-compose'
+        run: exit 1
+
+      - name: Сообщить Нику об ошибке
+        if: failure()
+        env:
+          T: ${{ secrets.NOTIFY_BOT_TOKEN }}
+          C: ${{ secrets.NOTIFY_CHAT_ID }}
+          A: ${{ inputs.adapter }}
+        run: |
+          [ -z "$T" ] && exit 0
+          curl -s "https://api.telegram.org/bot$T/sendMessage" -d chat_id="$C" \
+            --data-urlencode text="❌ Выкладка сервиса упала ($A): ${GITHUB_REPOSITORY} — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null

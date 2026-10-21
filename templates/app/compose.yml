@@ -1,0 +1,27 @@
+# deploy/compose.yml — сервис на VPS. Образ подставляет deploy-kit (переменная IMAGE).
+# Секреты — файл .env рядом на сервере (его кладёт Ник), в git его нет.
+# HTTPS и домен — Caddy: сертификат Let's Encrypt выпускается сам.
+services:
+  app:
+    image: ${IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    command: caddy reverse-proxy --from ${DOMAIN:-app.example.ru} --to app:3000
+    volumes: [caddy_data:/data]
+    depends_on: [app]
+volumes:
+  caddy_data: {}
+# База — управляемый Postgres (Yandex Managed PostgreSQL, Timeweb DBaaS): DATABASE_URL в .env.
+# Своя база на этом же VPS — только для пилота: сервис postgres:17 с томом и ежедневным pg_dump.

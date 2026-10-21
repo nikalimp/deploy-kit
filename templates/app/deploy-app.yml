@@ -1,0 +1,27 @@
+# Выкладка сервиса или админки — вызов общего сценария nikalimp/deploy-kit app.yml («Веб-сервис — стандарт» §6).
+# Порядок: проверки → образ Docker в Actions → реестр → выкладка → GET /api/health = 200 → иначе откат (vps-compose).
+# Секреты (Settings → Secrets and variables → Actions), вводит Ник (web:wizard):
+#   vps-compose:  SSH_KEY, SSH_HOST, SSH_USER, APP_DIR (/srv/<проект>/), SSH_KNOWN_HOSTS; на сервере — APP_DIR/.env
+#   yc-container: YC_SA_KEY, YC_REGISTRY_ID, YC_FOLDER_ID, YC_SERVICE_ACCOUNT_ID, APP_ENV
+#   registry: yandex — YC_SA_KEY, YC_REGISTRY_ID
+#   уведомления: NOTIFY_BOT_TOKEN, NOTIFY_CHAT_ID
+name: Deploy
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["specs/**", "*.md"]
+  workflow_dispatch: {}
+concurrency: { group: deploy, cancel-in-progress: false }
+jobs:
+  app:
+    permissions: { contents: read, packages: write }
+    uses: nikalimp/deploy-kit/.github/workflows/app.yml@v1
+    with:
+      adapter: vps-compose          # vps-compose | yc-container | platform (Timeweb Apps, Vercel Git)
+      app_dir: "."                  # монорепо: apps/admin
+      registry: ghcr                # ghcr | yandex
+      migrate_command: ""           # например: npx prisma migrate deploy
+      url: https://app.example.ru
+      health_path: /api/health
+      # yc_container: my-service    # для yc-container
+    secrets: inherit
