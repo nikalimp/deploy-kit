@@ -10,6 +10,8 @@
 # Workflow падает, только если не сработали SSH и FTP. Последний шаг — сайт отвечает 200.
 # Другие адаптеры: ftp (только FTP), s3 (Yandex Object Storage и любой S3), manual-zip, tilda.
 #
+# Вызывающий workflow обязан дать job права: permissions: { contents: write } — иначе запуск падает со startup_failure
+# («nested job 'deploy' is requesting 'contents: write', but is only allowed 'contents: read'»).
 # Доступ из других репозиториев: deploy-kit → Settings → Actions → General → Access →
 # «Accessible from repositories owned by the user».
 name: site
@@ -21,11 +23,11 @@ on:
       site_dir:      { type: string, default: "." }        # папка приложения в репозитории (монорепо: apps/site)
       out_dir:       { type: string, default: "out" }      # папка сборки внутри site_dir (Next.js export — out, Vite — dist)
       app_path:      { type: string, default: "" }         # подпапка на сервере внутри SITE_DIR / FTP_DIR, со слешем: "test/app/"
-      rsync_exclude: { type: string, default: "" }         # подпапки других приложений, которые выкладка не трогает: "test/ blog-old/"
+      rsync_exclude: { type: string, default: "" }         # что выкладка не трогает: подпапки других приложений ("test/") и файлы, живущие только на сервере ("api/config.php api/logs/")
       url:           { type: string, default: "" }         # адрес сайта для проверки (без app_path)
       media_brand:   { type: string, default: "content/factory/brand.json" }
-      noindex:       { type: string, default: "" }         # "1" — тестовая выкладка, закрыта от индексации
       node_version:  { type: string, default: "22" }
+      noindex:       { type: string, default: "" }         # устарело с 21.10.2026, не используется — оставлено, чтобы старые deploy.yml не падали
       build_command: { type: string, default: "" }         # пусто — npm run check, если он есть, иначе npm run build
     secrets:
       SSH_KEY: { required: false }
@@ -57,7 +59,6 @@ jobs:
     permissions:
       contents: write
     env:
-      NOINDEX: ${{ inputs.noindex }}
       MEDIA_BRAND: ${{ inputs.media_brand }}
       SSH_FIRST: ${{ inputs.adapter == 'ssh-ftp' || inputs.adapter == 'ssh-rsync' }}
     defaults:
@@ -196,12 +197,12 @@ jobs:
           echo "::error::Сайт ответил $code"; exit 1
 
       - name: IndexNow — отправить
-        if: env.NOINDEX != '1' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
         continue-on-error: true
         run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs submit || true'
 
       - name: Telegram и Max
-        if: env.NOINDEX != '1' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
