@@ -31,6 +31,7 @@ on:
       health_path:     { type: string, default: "/api/health" } # отвечает 200, когда приложение и база живы
       yc_container:    { type: string, default: "" }            # имя Serverless Container
       yc_resources:    { type: string, default: "--cores 1 --memory 512MB --concurrency 8 --execution-timeout 30s" }
+      ref:             { type: string, default: "" }            # ветка для выкладки; из pr.yml после автослияния — main
     secrets:
       SSH_KEY: { required: false }
       SSH_HOST: { required: false }
@@ -57,6 +58,7 @@ jobs:
         working-directory: ${{ inputs.app_dir }}
     steps:
       - uses: actions/checkout@v5
+        with: { ref: "${{ inputs.ref }}" }
 
       # ── Проверки: тот же набор, что и перед PR (lint, typecheck, тесты)
       - uses: actions/setup-node@v5

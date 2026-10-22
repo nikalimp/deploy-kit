@@ -1,0 +1,109 @@
+# deploy-kit — проверка и автослияние PR агента (reusable workflow). Решение Ника 22.10.2026: код, вёрстка и обновления
+# под стандарт выкладываются без его проверки — после зелёного check. Стандарт — «Публикация — стандарт» §4.
+#
+#   ветка claude/<задача> ─► PR ─► check (npm ci && npm run check) ─► зелёный ─► merge (GITHUB_TOKEN) ─► deploy в том же запуске
+#                                                    └─ красный ─► агент чинит в той же ветке
+#
+# Почему deploy — в том же запуске: слияние токеном GITHUB_TOKEN не создаёт событие push, и deploy.yml не стартует.
+# Поэтому вызывающий workflow (шаблон templates/pr.yml) запускает site.yml или app.yml сам, после job merge.
+# Ручное слияние Ника (метка needs-nik, чужие ветки) — обычный push в main, его выкладывает deploy.yml.
+#
+# Без автослияния (ждёт Ника):
+#   - ветка не claude/*, PR из форка или черновик;
+#   - метка needs-nik (секреты, удаление страниц или смена URL без 301, юридические тексты);
+#   - PR меняет пути из manual_paths (по умолчанию .github/ и publish.json — способ выкладки). Метку needs-nik ставит сам.
+# Откат: выкладка упала или сайт не отвечает — агент открывает PR с git revert (он тоже сольётся сам), Telegram — из site.yml.
+#
+# Вызывающий job даёт права: permissions: { contents: write, pull-requests: write }.
+name: pr
+
+on:
+  workflow_call:
+    inputs:
+      site_dir:      { type: string, default: "." }         # папка приложения (монорепо: apps/site)
+      check_command: { type: string, default: "" }          # пусто — npm run check, если он есть, иначе npm run build
+      node_version:  { type: string, default: "22" }
+      manual_paths:  { type: string, default: ".github/ publish.json" } # префиксы путей, которые сливает только Ник
+      merge_method:  { type: string, default: "squash" }    # squash | merge | rebase
+    outputs:
+      merged:
+        description: "true — PR слит, вызывающий workflow запускает выкладку"
+        value: ${{ jobs.merge.outputs.merged }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.site_dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: "${{ github.event.pull_request.head.sha }}" }
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.site_dir }}/package-lock.json
+      - run: npm ci
+      - name: npm run check
+        env:
+          CHECK: ${{ inputs.check_command }}
+        run: |
+          set -o pipefail
+          if [ -n "$CHECK" ]; then eval "$CHECK"
+          elif npm run | grep -q "^  check$"; then npm run check
+          else npm run build; fi 2>&1 | tee /tmp/check.log
+      - name: Итог проверки
+        if: always()
+        run: |
+          # журналы Actions из облачной сессии не читаются — главные строки идут в аннотации и сводку
+          f=$(grep -E "^✗|✗ " /tmp/check.log 2>/dev/null | head -10 || true)
+          if [ -n "$f" ]; then
+            while IFS= read -r l; do echo "::error::check: ${l#*✗ }"; done <<< "$f"
+            { echo "### check: ошибки"; echo '```'; echo "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- ✓ npm run check" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  merge:
+    needs: check
+    runs-on: ubuntu-latest
+    if: >-
+      startsWith(github.head_ref, 'claude/') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft &&
+      !contains(github.event.pull_request.labels.*.name, 'needs-nik')
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+    steps:
+      - name: Слияние
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          N: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          MANUAL: ${{ inputs.manual_paths }}
+          METHOD: ${{ inputs.merge_method }}
+        run: |
+          R="$GITHUB_REPOSITORY"
+          files=$(gh api "repos/$R/pulls/$N/files" --paginate -q '.[].filename')
+          hit=""
+          for p in $MANUAL; do hit="$hit$(printf '%s\n' "$files" | grep -E "^${p//./\\.}" || true)"; done
+          if [ -n "$hit" ]; then
+            gh api "repos/$R/issues/$N/labels" -f "labels[]=needs-nik" >/dev/null || true
+            echo "::notice::PR #$N меняет $(echo "$hit" | head -3 | tr '\n' ' ') — сливает только Ник (метка needs-nik)"
+            echo "- ⏸ PR #$N ждёт Ника: меняет способ выкладки или секреты" >> "$GITHUB_STEP_SUMMARY"
+            echo "merged=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # sha — защита от гонки: пока шёл check, в ветку могли запушить ещё коммит
+          gh api -X PUT "repos/$R/pulls/$N/merge" -f merge_method="$METHOD" -f sha="$SHA" >/dev/null
+          gh api -X DELETE "repos/$R/git/refs/heads/$GITHUB_HEAD_REF" >/dev/null || true
+          echo "::notice::PR #$N слит автоматически после зелёного check"
+          echo "- ✓ PR #$N слит автоматически (check зелёный), дальше — выкладка" >> "$GITHUB_STEP_SUMMARY"
+          echo "merged=true" >> "$GITHUB_OUTPUT"

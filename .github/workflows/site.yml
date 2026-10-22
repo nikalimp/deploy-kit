@@ -29,6 +29,7 @@ on:
       node_version:  { type: string, default: "22" }
       noindex:       { type: string, default: "" }         # устарело с 21.10.2026, не используется — оставлено, чтобы старые deploy.yml не падали
       build_command: { type: string, default: "" }         # пусто — npm run check, если он есть, иначе npm run build
+      ref:           { type: string, default: "" }         # ветка для выкладки; из pr.yml после автослияния — main
     secrets:
       SSH_KEY: { required: false }
       SSH_HOST: { required: false }
@@ -66,7 +67,7 @@ jobs:
         working-directory: ${{ inputs.site_dir }}
     steps:
       - uses: actions/checkout@v5
-        with: { fetch-depth: 50 }
+        with: { fetch-depth: 50, ref: "${{ inputs.ref }}" }
 
       - name: Tilda — выкладку делает Tilda MCP
         if: inputs.adapter == 'tilda'
@@ -138,7 +139,9 @@ jobs:
           SSH="ssh -i ~/.ssh/deploy_key -o ConnectTimeout=25 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15"
           for i in 1 2; do
             # --delete действует только внутри DEST: подпапки других приложений защищены --exclude
-            rsync -az --delete --stats "${EX[@]}" --rsync-path="mkdir -p '$DEST' && rsync" -e "$SSH" "$OUT/" "$SSH_USER@$SSH_HOST:$DEST" && exit 0
+            if rsync -az --delete --stats "${EX[@]}" --rsync-path="mkdir -p '$DEST' && rsync" -e "$SSH" "$OUT/" "$SSH_USER@$SSH_HOST:$DEST"; then
+              echo "::notice::Выкладка: SSH (rsync) → $DEST"; echo "- ✓ выкладка по SSH (rsync)" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            fi
             echo "SSH: попытка $i не прошла"; [ $i -lt 2 ] && sleep 20
           done
           echo "::warning::SSH до $SSH_HOST не прошёл (REG.RU закрывает порт 22 для IP GitHub Actions) — пробуем FTP"
@@ -162,6 +165,12 @@ jobs:
             **/.git*/**
             .well-known/**
             cgi-bin/**
+
+      - name: Путь выкладки — FTP
+        if: inputs.adapter == 'ftp' || (env.SSH_FIRST == 'true' && steps.ssh.outcome == 'failure')
+        run: |
+          echo "::notice::Выкладка: FTP (SSH не прошёл или адаптер ftp)"
+          echo "- ✓ выкладка по FTP" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Выкладка — s3 (Yandex Object Storage)
         if: inputs.adapter == 's3'
@@ -210,18 +219,33 @@ jobs:
           TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
           MAX_BOT_TOKEN: ${{ secrets.MAX_BOT_TOKEN }}
           MAX_CHAT_ID: ${{ secrets.MAX_CHAT_ID }}
-        run: '[ -f scripts/channels.mjs ] && node scripts/channels.mjs --brand "$MEDIA_BRAND" || true'
+        # итоги (что ушло в Telegram и Max, реестр) channels.mjs пишет аннотациями и в сводку запуска
+        run: |
+          [ -f scripts/channels.mjs ] || { echo "нет scripts/channels.mjs"; exit 0; }
+          node scripts/channels.mjs --brand "$MEDIA_BRAND" || { echo "::warning::channels.mjs упал — посты в Telegram и Max не ушли"; exit 1; }
 
       - name: Сохранить сгенерированные файлы
         if: inputs.adapter != 'tilda'
         continue-on-error: true
+        env:
+          REF: ${{ inputs.ref }}
         run: |
           git add public/blog content/media 2>/dev/null || true
           if git diff --cached --quiet; then echo "Нечего сохранять"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
           git commit -m "медиа и каналы блога [skip ci]"
-          for i in 1 2 3; do git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push && break; sleep 5; done
+          # --autostash: сборка меняет отслеживаемые файлы (отчёт geo-check за день, типограф) — без него pull --rebase
+          # отказывает, и реестр каналов не сохраняется: следующий запуск снова шлёт ту же статью в Telegram.
+          BR="${REF:-$GITHUB_REF_NAME}"
+          for i in 1 2 3; do
+            if git pull --rebase --autostash -X theirs origin "$BR" && git push origin "HEAD:$BR"; then
+              echo "::notice::Сохранено в $BR: медиа и реестр каналов"; exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::Не удалось сохранить медиа и реестр каналов (content/media/channels.json) — следующий запуск может повторить посты"
+          exit 1
 
       - name: Сообщить Нику об ошибке
         if: failure()

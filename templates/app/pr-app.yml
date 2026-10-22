@@ -1,0 +1,25 @@
+# PR агента в сервисе или админке: проверка → автослияние → выкладка (deploy-kit pr.yml + app.yml).
+# Значения with: у job deploy — те же, что в deploy.yml сервиса.
+name: PR
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+concurrency: { group: "pr-${{ github.event.pull_request.number }}", cancel-in-progress: true }
+jobs:
+  pr:
+    permissions: { contents: write, pull-requests: write }
+    uses: nikalimp/deploy-kit/.github/workflows/pr.yml@v1
+    with:
+      site_dir: "."
+      manual_paths: ".github/ publish.json deploy/ drizzle/ prisma/migrations/"   # миграции базы — только с Ником
+  deploy:
+    needs: pr
+    if: needs.pr.outputs.merged == 'true'
+    concurrency: { group: deploy, cancel-in-progress: false }
+    permissions: { contents: read, packages: write }
+    uses: nikalimp/deploy-kit/.github/workflows/app.yml@v1
+    with:
+      ref: main
+      adapter: vps-compose
+      url: https://app.example.ru
+    secrets: inherit
