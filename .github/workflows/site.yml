@@ -221,7 +221,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
           git commit -m "медиа и каналы блога [skip ci]"
-          for i in 1 2 3; do git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push && break; sleep 5; done
+          # --autostash: сборка меняет отслеживаемые файлы (отчёт geo-check за день, типограф) — без него pull --rebase
+          # отказывает, и реестр каналов не сохраняется: следующий запуск снова шлёт ту же статью в Telegram.
+          for i in 1 2 3; do
+            git pull --rebase --autostash -X theirs origin "${GITHUB_REF_NAME}" && git push && exit 0
+            sleep 5
+          done
+          echo "::warning::Не удалось сохранить медиа и реестр каналов (content/media/channels.json) — следующий запуск может повторить посты"
+          exit 1
 
       - name: Сообщить Нику об ошибке
         if: failure()
