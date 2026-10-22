@@ -47,7 +47,7 @@ on:
       S3_REGION: { required: false }         # по умолчанию ru-central1
       TELEGRAM_BOT_TOKEN: { required: false }
       TELEGRAM_CHAT_ID: { required: false }
-      TELEGRAPH_TOKEN: { required: false }
+      TELEGRAPH_TOKEN: { required: false }   # не используется с 22.10.2026 (Instant View убран), оставлен для старых deploy.yml
       MAX_BOT_TOKEN: { required: false }
       MAX_CHAT_ID: { required: false }
       NOTIFY_BOT_TOKEN: { required: false }  # бот Ника для сообщений об ошибках выкладки
@@ -216,7 +216,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
           MAX_BOT_TOKEN: ${{ secrets.MAX_BOT_TOKEN }}
           MAX_CHAT_ID: ${{ secrets.MAX_CHAT_ID }}
         # итоги (что ушло в Telegram и Max, реестр) channels.mjs пишет аннотациями и в сводку запуска
