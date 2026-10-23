@@ -39,7 +39,7 @@ on:
       FTP_HOST: { required: false }
       FTP_USER: { required: false }
       FTP_PASS: { required: false }
-      FTP_DIR: { required: false }           # относительно корня FTP, со слешем. REG.RU (основной аккаунт): www/<домен>/
+      FTP_DIR: { required: false }           # относительно корня FTP; слеш на конце добавится сам. REG.RU (основной аккаунт): www/<домен>/
       S3_BUCKET: { required: false }
       S3_ACCESS_KEY_ID: { required: false }
       S3_SECRET_ACCESS_KEY: { required: false }
@@ -151,6 +151,18 @@ jobs:
 
       # ── 2. FTP: если SSH не прошёл (ssh-ftp) или адаптер ftp. Не очищает сервер целиком (dangerous-clean-slate: false):
       #       .ftp-deploy-sync-state.json на сервере хранит, что уже залито, — дальше переносится только изменённое.
+      # FTP-Deploy-Action требует server-dir со слешем на конце: секрет FTP_DIR без слеша («www/site.ru») ронял выкладку.
+      # Нормализуем здесь, а не в секрете: путь — через GITHUB_ENV (outputs с секретом Actions не передаёт).
+      - name: FTP — папка на сервере
+        if: inputs.adapter == 'ftp' || (env.SSH_FIRST == 'true' && steps.ssh.outcome == 'failure')
+        env:
+          FTP_DIR: ${{ secrets.FTP_DIR }}
+          APP_PATH: ${{ inputs.app_path }}
+        run: |
+          d="${FTP_DIR:-./}"; [ "${d%/}" = "$d" ] && d="$d/"
+          a="$APP_PATH"; [ -n "$a" ] && [ "${a%/}" = "$a" ] && a="$a/"
+          echo "FTP_SERVER_DIR=$d$a" >> "$GITHUB_ENV"
+
       - name: Выкладка — FTP
         if: inputs.adapter == 'ftp' || (env.SSH_FIRST == 'true' && steps.ssh.outcome == 'failure')
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
@@ -160,7 +172,7 @@ jobs:
           password: ${{ secrets.FTP_PASS }}
           protocol: ftp
           local-dir: ${{ inputs.site_dir }}/${{ inputs.out_dir }}/
-          server-dir: ${{ secrets.FTP_DIR }}${{ inputs.app_path }}
+          server-dir: ${{ env.FTP_SERVER_DIR }}
           dangerous-clean-slate: false
           exclude: |
             **/.git*
