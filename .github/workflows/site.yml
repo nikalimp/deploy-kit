@@ -105,7 +105,8 @@ jobs:
 
       - name: IndexNow — что изменилось
         if: inputs.adapter != 'tilda'
-        run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs prepare || echo "нет indexnow.mjs"'
+        run: |
+          if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs prepare; else echo "нет indexnow.mjs"; fi
 
       # Сборка всегда доступна артефактом — для ручной выкладки (план 3) и для manual-zip
       - uses: actions/upload-artifact@v4
@@ -209,7 +210,8 @@ jobs:
       - name: IndexNow — отправить
         if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
         continue-on-error: true
-        run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs submit || true'
+        run: |
+          if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs submit || true; fi
 
       - name: Telegram и Max
         if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
