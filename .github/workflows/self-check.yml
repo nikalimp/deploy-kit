@@ -26,7 +26,7 @@ jobs:
           mkdir -p /tmp/t/.github/workflows && git init -q /tmp/t && cp templates/pr.yml templates/app/deploy-app.yml templates/app/pr-app.yml /tmp/t/.github/workflows/
           # ошибки — аннотациями: журналы Actions из облачной сессии не читаются
           # shellcheck disable=SC2016
-          F='{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}}::{{$err.Message}}{{"\n"}}{{end}}'
+          F='{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}}::{{$err.Message}}\n{{end}}'
           /tmp/actionlint -format "$F" .github/workflows/*.yml
           (cd /tmp/t && /tmp/actionlint -format "$F")
           echo "- ✓ actionlint: сценарии и шаблоны" >> "$GITHUB_STEP_SUMMARY"
