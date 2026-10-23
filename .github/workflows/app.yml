@@ -209,7 +209,7 @@ jobs:
         env:
           U: ${{ inputs.url }}${{ inputs.health_path }}
         run: |
-          for i in $(seq 1 12); do
+          for _ in $(seq 1 12); do
             code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 15 "$U" || true)
             echo "$U: $code"; [ "$code" = "200" ] && exit 0; sleep 10
           done
