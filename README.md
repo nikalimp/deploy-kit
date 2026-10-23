@@ -3,15 +3,18 @@
 ## Что делает
 Общие сценарии выкладки (reusable workflows GitHub Actions): `site.yml` — сайты (статика), `app.yml` — веб-сервисы и админки (Docker). Паспорт проекта — `publish.json`. Стандарты — «Публикация — стандарт», «Веб-сервис — стандарт».
 
+## Версии
+Проекты вызывают сценарии по `@main` — тега `v1` в шаблонах нет с 23.10.2026: правка действует везде сразу, переносить тег не нужно. Предохранитель — `self-check.yml`: каждый PR в deploy-kit проходит `actionlint` по сценариям и шаблонам, PR из `claude/*` с зелёной проверкой сливается сам. Тег `v1` оставлен для старых копий и больше не двигается.
+
 ## Файлы
 | Файл | Куда идёт |
 |---|---|
-| `.github/workflows/site.yml` | в репозиторий `nikalimp/deploy-kit`, тег `v1` |
+| `.github/workflows/site.yml` | в репозиторий `nikalimp/deploy-kit`, вызов `@main` |
 | `deploy.yml` | в проект: `.github/workflows/deploy.yml` (10 строк, вызов site.yml) |
 | `publish.json` | в корень проекта |
 | `deploy-manual.sh` | в проект: `scripts/deploy-<app>.sh` — план 3, выкладка с Mac |
-| `.github/workflows/app.yml` | в `nikalimp/deploy-kit`, тег `v1` — сервисы и админки |
-| `.github/workflows/pr.yml` | в `nikalimp/deploy-kit`, тег `v1` — check и автослияние PR агента |
+| `.github/workflows/app.yml` | в `nikalimp/deploy-kit`, вызов `@main` — сервисы и админки |
+| `.github/workflows/pr.yml` | в `nikalimp/deploy-kit`, вызов `@main` — check и автослияние PR агента |
 | `templates/pr.yml` | в проект сайта: `.github/workflows/pr.yml` (check → слияние → site.yml) |
 | `templates/app/pr-app.yml` | в проект сервиса: `.github/workflows/pr.yml` (check → слияние → app.yml) |
 | `templates/app/deploy-app.yml` | в проект сервиса: `.github/workflows/deploy.yml` |

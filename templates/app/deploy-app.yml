@@ -15,7 +15,7 @@ concurrency: { group: deploy, cancel-in-progress: false }
 jobs:
   app:
     permissions: { contents: read, packages: write }
-    uses: nikalimp/deploy-kit/.github/workflows/app.yml@v1
+    uses: nikalimp/deploy-kit/.github/workflows/app.yml@main
     with:
       adapter: vps-compose          # vps-compose | yc-container | platform (Timeweb Apps, Vercel Git)
       app_dir: "."                  # монорепо: apps/admin
