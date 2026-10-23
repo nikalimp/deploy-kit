@@ -1,5 +1,5 @@
 # deploy-kit — общий сценарий выкладки веб-сервисов и админок Ника (reusable workflow).
-# Живёт в nikalimp/deploy-kit, тег v1. Проект вызывает его из .github/workflows/deploy.yml (шаблон — deploy-app.yml).
+# Живёт в nikalimp/deploy-kit, проекты вызывают по @main. Проект вызывает его из .github/workflows/deploy.yml (шаблон — deploy-app.yml).
 # Стандарт — «Веб-сервис — стандарт» §«Выкладка», «Юрисдикция и стек», «Публикация — стандарт» (NikitOS).
 #
 # Порядок: проверки (npm run check или test) → образ Docker собирается в Actions → реестр → выкладка → /api/health → откат.
@@ -209,7 +209,7 @@ jobs:
         env:
           U: ${{ inputs.url }}${{ inputs.health_path }}
         run: |
-          for i in $(seq 1 12); do
+          for _ in $(seq 1 12); do
             code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 15 "$U" || true)
             echo "$U: $code"; [ "$code" = "200" ] && exit 0; sleep 10
           done

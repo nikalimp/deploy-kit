@@ -1,5 +1,5 @@
 # deploy-kit — общий сценарий выкладки всех сайтов Ника (reusable workflow).
-# Живёт в репозитории nikalimp/deploy-kit, тег v1. Проекты вызывают его из своего .github/workflows/deploy.yml.
+# Живёт в репозитории nikalimp/deploy-kit. Проекты вызывают его по @main (без тега, с 23.10.2026) из своего .github/workflows/deploy.yml.
 # Стандарт — «Публикация — стандарт» и «Хостинги — что проверено» (NikitOS).
 #
 # Адаптер по умолчанию — ssh-ftp: три пути выкладки по убыванию.
@@ -86,7 +86,8 @@ jobs:
       - name: Медиа статей (обложки, скриншоты, инфографика)
         if: inputs.adapter != 'tilda'
         run: |
-          if [ -f scripts/media.mjs ] && ls content/media/*.json 2>/dev/null | grep -qv "channels.json"; then
+          specs=$(find content/media -maxdepth 1 -name "*.json" ! -name channels.json 2>/dev/null | head -1)
+          if [ -f scripts/media.mjs ] && [ -n "$specs" ]; then
             npx playwright install --with-deps chromium
             node scripts/media.mjs --brand "$MEDIA_BRAND"
           else
@@ -104,7 +105,8 @@ jobs:
 
       - name: IndexNow — что изменилось
         if: inputs.adapter != 'tilda'
-        run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs prepare || echo "нет indexnow.mjs"'
+        run: |
+          if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs prepare; else echo "нет indexnow.mjs"; fi
 
       # Сборка всегда доступна артефактом — для ручной выкладки (план 3) и для manual-zip
       - uses: actions/upload-artifact@v4
@@ -199,7 +201,7 @@ jobs:
           APP_PATH: ${{ inputs.app_path }}
         run: |
           U="${URL%/}/${APP_PATH}"
-          for i in 1 2 3; do
+          for _ in 1 2 3; do
             code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 20 "$U" || true)
             echo "$U: $code"; [ "$code" = "200" ] && exit 0; sleep 10
           done
@@ -208,7 +210,8 @@ jobs:
       - name: IndexNow — отправить
         if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
         continue-on-error: true
-        run: '[ -f scripts/indexnow.mjs ] && node scripts/indexnow.mjs submit || true'
+        run: |
+          if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs submit || true; fi
 
       - name: Telegram и Max
         if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
@@ -237,7 +240,7 @@ jobs:
           # --autostash: сборка меняет отслеживаемые файлы (отчёт geo-check за день, типограф) — без него pull --rebase
           # отказывает, и реестр каналов не сохраняется: следующий запуск снова шлёт ту же статью в Telegram.
           BR="${REF:-$GITHUB_REF_NAME}"
-          for i in 1 2 3; do
+          for _ in 1 2 3; do
             if git pull --rebase --autostash -X theirs origin "$BR" && git push origin "HEAD:$BR"; then
               echo "::notice::Сохранено в $BR: медиа и реестр каналов"; exit 0
             fi

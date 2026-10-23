@@ -1,0 +1,53 @@
+# Проверка самого deploy-kit. Проекты вызывают сценарии по @main — тега v1 больше нет в шаблонах (23.10.2026),
+# поэтому любая правка здесь сразу действует во всех проектах. Предохранитель — этот workflow:
+#   PR ─► actionlint по .github/workflows и templates ─► зелёный ─► PR из claude/* сливается сам ─► действует везде
+#                                                   └─ красный ─► чинить в той же ветке
+# Прямой push в main — только Ник.
+name: self-check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+concurrency: { group: "self-check-${{ github.event.pull_request.number }}", cancel-in-progress: true }
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: "${{ github.event.pull_request.head.sha }}" }
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 /tmp
+          # шаблоны проектов проверяем как обычные workflow
+          mkdir -p /tmp/t/.github/workflows && git init -q /tmp/t && cp templates/pr.yml templates/app/deploy-app.yml templates/app/pr-app.yml /tmp/t/.github/workflows/
+          # ошибки — аннотациями: журналы Actions из облачной сессии не читаются
+          # shellcheck disable=SC2016
+          F='{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}}::{{$err.Message}}\n{{end}}'
+          /tmp/actionlint -format "$F" .github/workflows/*.yml
+          (cd /tmp/t && /tmp/actionlint -format "$F")
+          echo "- ✓ actionlint: сценарии и шаблоны" >> "$GITHUB_STEP_SUMMARY"
+
+  merge:
+    needs: check
+    runs-on: ubuntu-latest
+    if: >-
+      startsWith(github.head_ref, 'claude/') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft &&
+      !contains(github.event.pull_request.labels.*.name, 'needs-nik')
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          N: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$N/merge" -f merge_method=squash -f sha="$SHA" >/dev/null
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_HEAD_REF" >/dev/null || true
+          echo "::notice::PR #$N слит автоматически после зелёного actionlint — действует во всех проектах (@main)"

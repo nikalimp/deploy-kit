@@ -10,7 +10,7 @@ concurrency: { group: "pr-${{ github.event.pull_request.number }}", cancel-in-pr
 jobs:
   pr:
     permissions: { contents: write, pull-requests: write }
-    uses: nikalimp/deploy-kit/.github/workflows/pr.yml@v1
+    uses: nikalimp/deploy-kit/.github/workflows/pr.yml@main
     with:
       site_dir: "."
   deploy:
@@ -18,7 +18,7 @@ jobs:
     if: needs.pr.outputs.merged == 'true'
     concurrency: { group: deploy, cancel-in-progress: false }
     permissions: { contents: write }
-    uses: nikalimp/deploy-kit/.github/workflows/site.yml@v1
+    uses: nikalimp/deploy-kit/.github/workflows/site.yml@main
     with:
       ref: main
       adapter: ssh-ftp
