@@ -12,7 +12,7 @@ concurrency: { group: "self-check-${{ github.event.pull_request.number }}", canc
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -33,7 +33,7 @@ jobs:
 
   merge:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: >-
       startsWith(github.head_ref, 'claude/') &&
       github.event.pull_request.head.repo.full_name == github.repository &&

@@ -55,7 +55,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: write
@@ -88,8 +88,11 @@ jobs:
         run: |
           specs=$(find content/media -maxdepth 1 -name "*.json" ! -name channels.json 2>/dev/null | head -1)
           if [ -f scripts/media.mjs ] && [ -n "$specs" ]; then
-            npx playwright install --with-deps chromium
-            node scripts/media.mjs --brand "$MEDIA_BRAND"
+            # журналы Actions из облачной сессии не читаются — причина падения уходит в аннотации и сводку
+            fail() { echo "::error::media: $1"; tail -15 /tmp/media.log | while IFS= read -r l; do echo "::error::media: $l"; done
+                     { echo "### media: $1"; echo '```'; tail -30 /tmp/media.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+            npx playwright install --with-deps chromium > /tmp/media.log 2>&1 || fail "playwright install упал"
+            node scripts/media.mjs --brand "$MEDIA_BRAND" 2>&1 | tee /tmp/media.log; [ "${PIPESTATUS[0]}" = 0 ] || fail "media.mjs упал"
           else
             echo "Нет медиа статей — пропускаю"
           fi
