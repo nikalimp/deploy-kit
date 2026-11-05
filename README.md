@@ -22,7 +22,7 @@
 | `templates/app/Dockerfile`, `health-route.ts` | в проект: Dockerfile Next.js standalone и `/api/health` |
 
 ## Адаптеры
-- `ssh-ftp` (по умолчанию) — три пути: SSH (rsync, `id: ssh`, continue-on-error) → FTP (`if: steps.ssh.outcome == 'failure'`, FTP-Deploy-Action, без clean-slate) → вручную с Mac (`deploy-manual.sh`). Сборка всегда — артефакт `site-build`. Красный, только если упали SSH и FTP. В конце — curl 200.
+- `ssh-ftp` (по умолчанию) — три пути: SSH (rsync, `id: ssh`, continue-on-error) → FTP (`if: steps.ssh.outcome == 'failure'`, FTP-Deploy-Action, без clean-slate) → вручную с Mac (`deploy-manual.sh`). Сборка — артефакт `site-build` (хранится 1 день; шаг необязательный — при нехватке хранилища Actions выкладка продолжается, кроме `manual-zip`). Красный, только если упали SSH и FTP. В конце — curl 200.
 - `ftp`, `s3` (Yandex Object Storage и любой S3), `manual-zip`, `tilda`. `ssh-rsync` — старое имя `ssh-ftp`.
 - Секреты и чек-лист нового проекта — «Хостинги — что проверено».
 - Монорепо: `site_dir`, `out_dir`, `app_path`, `rsync_exclude`.
