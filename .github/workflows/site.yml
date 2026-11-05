@@ -111,13 +111,16 @@ jobs:
         run: |
           if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs prepare; else echo "нет indexnow.mjs"; fi
 
-      # Сборка всегда доступна артефактом — для ручной выкладки (план 3) и для manual-zip
+      # Сборка доступна артефактом — для ручной выкладки (план 3) и для manual-zip.
+      # Необязательный шаг: кончилось хранилище Actions — выкладка всё равно идёт (05.11 лимит 500 МБ остановил 7 выкладок подряд).
+      # Хранится 1 день: архив нужен только сразу после сборки, а место общее на все репозитории аккаунта.
       - uses: actions/upload-artifact@v4
         if: inputs.adapter != 'tilda'
+        continue-on-error: ${{ inputs.adapter != 'manual-zip' }}
         with:
           name: site-build
           path: ${{ inputs.site_dir }}/${{ inputs.out_dir }}
-          retention-days: 7
+          retention-days: 1
 
       # ── 1. SSH (rsync). REG.RU обрывает частые подключения с одного IP: без ssh-keyscan и пробного входа,
       #       ровно одно соединение на попытку. Не прошло — предупреждение и выход 1, дальше FTP.
