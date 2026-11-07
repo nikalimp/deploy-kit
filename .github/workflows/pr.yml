@@ -48,6 +48,16 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ inputs.site_dir }}/package-lock.json
       - run: npm ci
+      - name: Общие проверки — свежие скрипты из deploy-kit
+        run: |
+          for f in scripts/*.mjs scripts/*.py; do
+            [ -f "$f" ] || continue
+            name=$(head -5 "$f" | grep -o "@nikitos-shared [a-z0-9.-]*" | cut -d" " -f2) || true
+            [ -n "$name" ] || continue
+            curl -fsSL --max-time 20 "https://raw.githubusercontent.com/nikalimp/deploy-kit/main/shared/$name" -o "/tmp/$name" \
+              && { cmp -s "/tmp/$name" "$f" || { cp "/tmp/$name" "$f"; echo "::notice::$f обновлён из deploy-kit/shared"; }; } \
+              || echo "deploy-kit/shared/$name недоступен — копия проекта"
+          done
       - name: npm run check
         env:
           CHECK: ${{ inputs.check_command }}

@@ -30,6 +30,7 @@ on:
       noindex:       { type: string, default: "" }         # устарело с 21.10.2026, не используется — оставлено, чтобы старые deploy.yml не падали
       build_command: { type: string, default: "" }         # пусто — npm run check, если он есть, иначе npm run build
       ref:           { type: string, default: "" }         # ветка для выкладки; из pr.yml после автослияния — main
+      pagespeed:     { type: string, default: "90" }       # порог мобильного Lighthouse Performance; ниже — предупреждение и сводка (стандарт §6.6); "" — не мерить
     secrets:
       SSH_KEY: { required: false }
       SSH_HOST: { required: false }
@@ -96,6 +97,20 @@ jobs:
           else
             echo "Нет медиа статей — пропускаю"
           fi
+
+      - name: Общие проверки — свежие скрипты из deploy-kit
+        if: inputs.adapter != 'tilda'
+        run: |
+          # Скрипт с меткой «@nikitos-shared <имя>» в первых строках берётся из deploy-kit/shared — одна версия на все проекты.
+          # deploy-kit недоступен (приватный) — остаётся копия проекта.
+          for f in scripts/*.mjs scripts/*.py; do
+            [ -f "$f" ] || continue
+            name=$(head -5 "$f" | grep -o "@nikitos-shared [a-z0-9.-]*" | cut -d" " -f2) || true
+            [ -n "$name" ] || continue
+            if curl -fsSL --max-time 20 "https://raw.githubusercontent.com/nikalimp/deploy-kit/main/shared/$name" -o "/tmp/$name"; then
+              cmp -s "/tmp/$name" "$f" || { cp "/tmp/$name" "$f"; echo "::notice::$f обновлён из deploy-kit/shared"; }
+            else echo "deploy-kit/shared/$name недоступен — копия проекта"; fi
+          done
 
       - name: Проверка и сборка
         if: inputs.adapter != 'tilda'
@@ -224,6 +239,28 @@ jobs:
             echo "$U: $code"; [ "$code" = "200" ] && exit 0; sleep 10
           done
           echo "::error::Сайт ответил $code"; exit 1
+
+      - name: PageSpeed (мобильный Lighthouse)
+        if: inputs.url != '' && inputs.pagespeed != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        continue-on-error: true
+        env:
+          URL: ${{ inputs.url }}
+          APP_PATH: ${{ inputs.app_path }}
+          MIN: ${{ inputs.pagespeed }}
+        run: |
+          U="${URL%/}/${APP_PATH}"
+          CH=$(command -v google-chrome || command -v chromium || true)
+          npx --yes lighthouse@12 "$U" --quiet --form-factor=mobile --only-categories=performance,accessibility,best-practices,seo \
+            --output=json --output-path=/tmp/lh.json --chrome-path="$CH" --chrome-flags="--headless=new --no-sandbox" >/dev/null 2>&1 || { echo "::warning::PageSpeed: Lighthouse не запустился"; exit 0; }
+          # shellcheck disable=SC2016
+          node -e '
+            const r=require("/tmp/lh.json"), c=r.categories, s=k=>Math.round((c[k]?.score||0)*100), a=r.audits;
+            const perf=s("performance"), min=+process.env.MIN;
+            const line=`PageSpeed mobile: Performance ${perf}, Accessibility ${s("accessibility")}, Best Practices ${s("best-practices")}, SEO ${s("seo")} · LCP ${a["largest-contentful-paint"]?.displayValue} · CLS ${a["cumulative-layout-shift"]?.displayValue} · TBT ${a["total-blocking-time"]?.displayValue}`;
+            console.log((perf<min?"::warning::":"::notice::")+line+(perf<min?` — ниже ${min}, задача на исправление (стандарт §6.6)`:""));
+            const top=Object.values(a).filter(x=>x.details?.type==="opportunity"&&x.score!==null&&x.score<0.9).sort((x,y)=>(y.numericValue||0)-(x.numericValue||0)).slice(0,5);
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY,`### ${line}\n`+top.map(x=>`- ${x.title}: ${x.displayValue||""}`).join("\n")+"\n");
+          '
 
       - name: IndexNow — отправить
         if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
