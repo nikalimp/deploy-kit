@@ -21,6 +21,7 @@ const OUT = path.join(ROOT, "out");
 // Проектные настройки проверок — scripts/check.local.mjs (необязательный, переживает обновление этого файла из стартера):
 //   export const glavredSkip = ["/privacy-policy/", …] — страницы, которые Главред не проверяет (юридические тексты переносятся дословно)
 //   export const thinOk = ["/consent/", …] — служебные страницы, которым не нужен минимум 250 слов
+//   export const exceptions = { privacy: "причина", requisites: "причина" } — исключения из spec §9 «Исключения»: блок становится предупреждением
 //   export default async ({ ROOT, OUT, fail, ok, warn, prodFail }) => { … } — свои проверки, раздел 8
 const localPath = path.join(ROOT, "scripts", "check.local.mjs");
 let localMod = null;
@@ -138,8 +139,11 @@ if (!fs.readdirSync(path.join(ROOT, "public")).some((f) => /^[a-f0-9]{32}\.txt$/
 const home = fs.readFileSync(path.join(OUT, "index.html"), "utf8");
 if (/mc\.yandex\.ru\/metrika/.test(home)) ok("Яндекс Метрика подключена");
 else warn("Яндекс Метрика не подключена — напоминание (стандарт §9.0): свой проект — сразу, клиентский — после публикации на его домене; номер — site.metrikaId");
+const EXC = localMod?.exceptions ?? {};
 for (const page of ["privacy-policy", "consent"]) {
-  if (!fs.existsSync(path.join(OUT, page, "index.html"))) prodFail(`Нет страницы /${page}/ — политика и отдельное согласие на обработку ПДн обязательны (стандарт §8)`);
+  if (fs.existsSync(path.join(OUT, page, "index.html"))) continue;
+  if (EXC.privacy) warn(`Нет /${page}/ — исключение проекта: ${EXC.privacy}`);
+  else prodFail(`Нет страницы /${page}/ — политика и отдельное согласие на обработку ПДн обязательны (стандарт §8)`);
 }
 // ИНН и ОГРН — контрольные суммы ФНС: ловят КПП вместо ИНН, опечатки и перепутанные поля
 // site.ts — в src/content/ (стартер) или src/lib/ (nikalimp.ru и старые проекты)
@@ -164,6 +168,8 @@ const npd = /status:\s*"[^"]*(самозанят|НПД|профессионал
 if (npd) {
   if (!/^\d{12}$/.test(inn) || !innOk(inn)) fail(`Самозанятый: ИНН ${inn || "пусто"} — нужен ИНН физлица из 12 цифр с верной контрольной суммой`);
   else ok(`Реквизиты: самозанятый, ИНН ${inn} корректен по контрольной сумме`);
+} else if (EXC.requisites) {
+  ok(`Реквизиты не требуются — исключение проекта: ${EXC.requisites}`);
 } else if (/TODO/.test(inn + ogrn) || !inn || !ogrn) prodFail("Реквизиты не заполнены: legal.inn и legal.ogrn (у ИП — legal.ogrnip) в src/content/site.ts");
 else {
   if (!innOk(inn)) fail(`ИНН ${inn} не проходит контрольную сумму (10 цифр — ООО, 12 — ИП; 9 цифр — это КПП, не ИНН). Сверь с ЕГРЮЛ: egrul.nalog.ru`);
