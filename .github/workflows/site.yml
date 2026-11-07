@@ -56,7 +56,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 60 # первая заливка крупного раздела (1000+ новых страниц) по rsync идёт дольше 25 минут
     permissions:
       contents: write
     env:
