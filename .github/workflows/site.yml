@@ -19,6 +19,7 @@ name: site
 on:
   workflow_call:
     inputs:
+      runner:        { type: string, default: "ubuntu-24.04" }  # self-hosted — свой раннер (Mac): не тратит минуты Actions
       adapter:       { type: string, default: "ssh-ftp" }  # ssh-ftp | ftp | s3 | manual-zip | tilda (ssh-rsync = ssh-ftp)
       site_dir:      { type: string, default: "." }        # папка приложения в репозитории (монорепо: apps/site)
       out_dir:       { type: string, default: "out" }      # папка сборки внутри site_dir (Next.js export — out, Vite — dist)
@@ -56,7 +57,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 60 # первая заливка крупного раздела (1000+ новых страниц) по rsync идёт дольше 25 минут
     permissions:
       contents: write
@@ -154,12 +155,13 @@ jobs:
           OUT: ${{ inputs.out_dir }}
         run: |
           [ -z "$SSH_KEY" ] || [ -z "$SITE_DIR" ] && { echo "::warning::Нет SSH_KEY или SITE_DIR — пробуем FTP"; exit 1; }
-          mkdir -p ~/.ssh && echo "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          # ключ — во временной папке раннера: на своём Mac не трогаем ~/.ssh
+          KEY="${RUNNER_TEMP:-$HOME/.ssh}/deploy_key"; mkdir -p ~/.ssh "$(dirname "$KEY")"; echo "$SSH_KEY" > "$KEY"; chmod 600 "$KEY"
           [ -n "$SSH_KNOWN_HOSTS" ] && echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
           DEST="${SITE_DIR%/}/${APP_PATH}"
           EX=(--exclude '.well-known/' --exclude 'cgi-bin/' --exclude '.ftp-deploy-sync-state.json')
           for d in $EXCLUDE; do EX+=(--exclude "$d"); done
-          SSH="ssh -i ~/.ssh/deploy_key -o ConnectTimeout=25 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15"
+          SSH="ssh -i $KEY -o ConnectTimeout=25 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15"
           for i in 1 2; do
             # --delete действует только внутри DEST: подпапки других приложений защищены --exclude
             if rsync -az --delete --stats "${EX[@]}" --rsync-path="mkdir -p '$DEST' && rsync" -e "$SSH" "$OUT/" "$SSH_USER@$SSH_HOST:$DEST"; then
