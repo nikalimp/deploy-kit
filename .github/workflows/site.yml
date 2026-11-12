@@ -33,6 +33,7 @@ on:
       ref:           { type: string, default: "" }         # ветка для выкладки; из pr.yml после автослияния — main
       pagespeed:     { type: string, default: "90" }       # порог мобильного Lighthouse Performance; ниже — предупреждение и сводка (стандарт §6.6); "" — не мерить
     secrets:
+      BUILD_ENV: { required: false }  # строки KEY=VALUE для сборки (публичные ключи NEXT_PUBLIC_*), пишутся в .env.production.local — не в git
       SSH_KEY: { required: false }
       SSH_HOST: { required: false }
       SSH_USER: { required: false }
@@ -117,7 +118,9 @@ jobs:
         if: inputs.adapter != 'tilda'
         env:
           BUILD: ${{ inputs.build_command }}
+          BUILD_ENV: ${{ secrets.BUILD_ENV }}
         run: |
+          if [ -n "$BUILD_ENV" ]; then printf '%s\n' "$BUILD_ENV" > .env.production.local; echo "::notice::BUILD_ENV → .env.production.local ($(grep -c = .env.production.local) знач.)"; fi
           if [ -n "$BUILD" ]; then eval "$BUILD"
           elif npm run | grep -q "^  check$"; then npm run check
           else npm run build; fi
