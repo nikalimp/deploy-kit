@@ -1,0 +1,50 @@
+# deploy-kit — очередь публикации контент-завода (reusable workflow).
+# По будням проект вызывает его из своего deploy.yml (schedule) перед выкладкой: статьи дня из плана (status ready,
+# дата <= сегодня) переходят из черновиков в блог, план получает published, коммит — в main.
+# Пишет статьи субботняя задача Claude «Неделя — все проекты»; по будням Claude не нужен.
+# Выход published=true — вызывающий deploy.yml запускает выкладку (job site с ref: main): коммит через GITHUB_TOKEN
+# сам новых запусков не создаёт. Каналы (Telegram, Max) отправляет шаг «Telegram и Max» выкладки.
+name: queue
+
+on:
+  workflow_call:
+    inputs:
+      config:     { type: string, default: "content/factory/content.config.json" }  # конфиг контент-завода в репозитории проекта
+      max:        { type: string, default: "2" }                                     # не больше статей за запуск (пропущенные дни)
+      runner:     { type: string, default: "ubuntu-24.04" }
+    outputs:
+      published:
+        value: ${{ jobs.queue.outputs.published }}
+      titles:
+        value: ${{ jobs.queue.outputs.titles }}
+
+jobs:
+  queue:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    permissions: { contents: write }
+    outputs:
+      published: ${{ steps.q.outputs.published }}
+      titles: ${{ steps.q.outputs.titles }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: main }
+      - name: Статьи дня из очереди
+        id: q
+        env:
+          CFG: ${{ inputs.config }}
+          MAX: ${{ inputs.max }}
+        run: |
+          curl -fsSL --max-time 20 https://raw.githubusercontent.com/nikalimp/deploy-kit/main/shared/queue-publish.mjs -o /tmp/queue-publish.mjs
+          node /tmp/queue-publish.mjs "$CFG" --max "$MAX"
+      - name: Коммит
+        if: steps.q.outputs.published == 'true'
+        env:
+          TITLES: ${{ steps.q.outputs.titles }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "статья: $TITLES"
+          for _ in 1 2 3; do git pull --rebase -X theirs -q origin main && git push -q origin HEAD:main && exit 0; sleep 5; done
+          echo "::error::Очередь: не удалось сохранить коммит в main"; exit 1

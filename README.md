@@ -20,6 +20,9 @@
 | `templates/app/deploy-app.yml` | в проект сервиса: `.github/workflows/deploy.yml` |
 | `templates/app/compose.yml` | в проект: `deploy/compose.yml` (vps-compose) |
 | `templates/app/Dockerfile`, `health-route.ts` | в проект: Dockerfile Next.js standalone и `/api/health` |
+| `.github/workflows/queue.yml` + `shared/queue-publish.mjs` | в `nikalimp/deploy-kit`, вызов `@main` из `deploy.yml` проекта по будням (schedule): статья дня из плана (ready, дата ≤ сегодня) → блог → выкладка → каналы. Claude по будням не нужен |
+| `.github/workflows/data.yml` + `shared/gsc-report.mjs`, `shared/yandex-report.mjs` | в `nikalimp/deploy-kit`, вызов `@main` из `data.yml` проекта по субботам 11:04 (Бангкок): Search Console, Вебмастер, Метрика и лиды (цели Метрики, только числа) → `specs/reports/{gsc,yandex}/` |
+| `templates/data.yml`, `templates/deploy-queue.md` | в проект: `.github/workflows/data.yml`; как добавить очередь в `deploy.yml` |
 
 ## Адаптеры
 - `ssh-ftp` (по умолчанию) — три пути: SSH (rsync, `id: ssh`, continue-on-error) → FTP (`if: steps.ssh.outcome == 'failure'`, FTP-Deploy-Action, без clean-slate) → вручную с Mac (`deploy-manual.sh`). Сборка — артефакт `site-build` (хранится 1 день; шаг необязательный — при нехватке хранилища Actions выкладка продолжается, кроме `manual-zip`). Красный, только если упали SSH и FTP. В конце — curl 200.

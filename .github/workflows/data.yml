@@ -1,0 +1,59 @@
+# deploy-kit — данные недели для отчёта (reusable workflow).
+# Проект вызывает его из своего .github/workflows/data.yml по субботам в 11:04 по Бангкоку — за полтора часа до задачи
+# Claude «Неделя — все проекты» (12:34), которая читает выгрузки и пишет отчёт.
+# Выгрузки: <reports_dir>/gsc/ДАТА.json (Search Console) и <reports_dir>/yandex/ДАТА.json (Вебмастер, Метрика, лиды —
+# цели Метрики, только числа). Папка specs на сайт не выкладывается.
+# Секреты проекта: GSC_SERVICE_ACCOUNT (JSON сервисного аккаунта, его почта — пользователь ресурса в Search Console),
+# YANDEX_OAUTH_TOKEN (приложение «NikitOS — отчёты сайтов», живёт год). Нет секрета — шаг пропускается с предупреждением.
+name: data
+
+on:
+  workflow_call:
+    inputs:
+      site_url:    { type: string, required: true }                 # https://example.ru
+      reports_dir: { type: string, default: "specs/reports" }        # nikalimp.ru — .site/specs/reports
+      gsc_inspect: { type: string, default: "60" }                   # сколько адресов проверить URL Inspection (лимит API — 2000 в сутки)
+      runner:      { type: string, default: "ubuntu-24.04" }
+    secrets:
+      GSC_SERVICE_ACCOUNT: { required: false }
+      YANDEX_OAUTH_TOKEN: { required: false }
+
+jobs:
+  data:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions: { contents: write }
+    env:
+      SITE_URL: ${{ inputs.site_url }}
+      REPORTS_DIR: ${{ inputs.reports_dir }}
+      GSC_INSPECT: ${{ inputs.gsc_inspect }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: main }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - name: Скрипты из deploy-kit
+        run: for f in gsc-report.mjs yandex-report.mjs; do curl -fsSL --max-time 20 "https://raw.githubusercontent.com/nikalimp/deploy-kit/main/shared/$f" -o "/tmp/$f"; done
+      - name: Search Console
+        continue-on-error: true
+        env:
+          GSC_SERVICE_ACCOUNT: ${{ secrets.GSC_SERVICE_ACCOUNT }}
+        run: |
+          [ -n "$GSC_SERVICE_ACCOUNT" ] || { echo "::warning::Search Console: нет секрета GSC_SERVICE_ACCOUNT"; exit 0; }
+          node /tmp/gsc-report.mjs
+      - name: Яндекс Вебмастер и Метрика
+        continue-on-error: true
+        env:
+          YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
+        run: |
+          [ -n "$YANDEX_OAUTH_TOKEN" ] || { echo "::warning::Яндекс: нет секрета YANDEX_OAUTH_TOKEN"; exit 0; }
+          node /tmp/yandex-report.mjs
+      - name: Сохранить в репозиторий
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add "$REPORTS_DIR"
+          git diff --cached --quiet && { echo "Нечего сохранять"; exit 0; }
+          git commit -m "аналитика: выгрузка $(date -u +%F) [skip ci]"
+          for _ in 1 2 3; do git pull --rebase -X theirs -q origin main && git push -q origin HEAD:main && exit 0; sleep 5; done
+          echo "::error::Не удалось сохранить выгрузку в main"; exit 1
