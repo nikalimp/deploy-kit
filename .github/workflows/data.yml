@@ -5,6 +5,7 @@
 # цели Метрики, только числа). Папка specs на сайт не выкладывается.
 # Секреты проекта: GSC_SERVICE_ACCOUNT (JSON сервисного аккаунта, его почта — пользователь ресурса в Search Console),
 # YANDEX_OAUTH_TOKEN (приложение «NikitOS — отчёты сайтов», живёт год). Нет секрета — шаг пропускается с предупреждением.
+# Только боевые сайты на своих доменах: тестовые поддомены *.nikalimp.ru поисковикам не подключаем — выгрузка пропускается.
 name: data
 
 on:
@@ -28,13 +29,21 @@ jobs:
       REPORTS_DIR: ${{ inputs.reports_dir }}
       GSC_INSPECT: ${{ inputs.gsc_inspect }}
     steps:
+      - name: Только боевой домен
+        id: prod
+        run: |
+          case "$SITE_URL" in *.nikalimp.ru|*.nikalimp.ru/) echo "::notice::$SITE_URL — тестовый поддомен, Search Console и Яндекс не подключаем"; echo "ok=false" >> "$GITHUB_OUTPUT";; *) echo "ok=true" >> "$GITHUB_OUTPUT";; esac
       - uses: actions/checkout@v5
+        if: steps.prod.outputs.ok == 'true'
         with: { ref: main }
       - uses: actions/setup-node@v5
+        if: steps.prod.outputs.ok == 'true'
         with: { node-version: 22 }
       - name: Скрипты из deploy-kit
+        if: steps.prod.outputs.ok == 'true'
         run: for f in gsc-report.mjs yandex-report.mjs; do curl -fsSL --max-time 20 "https://raw.githubusercontent.com/nikalimp/deploy-kit/main/shared/$f" -o "/tmp/$f"; done
       - name: Search Console
+        if: steps.prod.outputs.ok == 'true'
         continue-on-error: true
         env:
           GSC_SERVICE_ACCOUNT: ${{ secrets.GSC_SERVICE_ACCOUNT }}
@@ -42,6 +51,7 @@ jobs:
           [ -n "$GSC_SERVICE_ACCOUNT" ] || { echo "::warning::Search Console: нет секрета GSC_SERVICE_ACCOUNT"; exit 0; }
           node /tmp/gsc-report.mjs
       - name: Яндекс Вебмастер и Метрика
+        if: steps.prod.outputs.ok == 'true'
         continue-on-error: true
         env:
           YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
@@ -49,6 +59,7 @@ jobs:
           [ -n "$YANDEX_OAUTH_TOKEN" ] || { echo "::warning::Яндекс: нет секрета YANDEX_OAUTH_TOKEN"; exit 0; }
           node /tmp/yandex-report.mjs
       - name: Сохранить в репозиторий
+        if: steps.prod.outputs.ok == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
