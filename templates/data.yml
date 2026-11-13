@@ -1,0 +1,19 @@
+# Данные недели для отчёта контент-завода и аудита — вызов deploy-kit/.github/workflows/data.yml.
+# Суббота 11:04 по Бангкоку, до задачи Claude «Неделя — все проекты» (12:34).
+# Секреты: GSC_SERVICE_ACCOUNT, YANDEX_OAUTH_TOKEN (нет — шаг пропускается с предупреждением).
+name: Data weekly
+on:
+  schedule:
+    - cron: "4 4 * * 6"
+  workflow_dispatch: {}
+concurrency: { group: data, cancel-in-progress: false }
+jobs:
+  data:
+    permissions: { contents: write }
+    uses: nikalimp/deploy-kit/.github/workflows/data.yml@main
+    with:
+      site_url: https://example.ru
+      reports_dir: specs/reports
+    secrets:
+      GSC_SERVICE_ACCOUNT: ${{ secrets.GSC_SERVICE_ACCOUNT }}
+      YANDEX_OAUTH_TOKEN: ${{ secrets.YANDEX_OAUTH_TOKEN }}
