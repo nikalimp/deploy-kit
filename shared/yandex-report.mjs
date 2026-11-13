@@ -39,12 +39,20 @@ const qs = (o) => Object.entries(o).flatMap(([k, v]) => (Array.isArray(v) ? v : 
 async function webmaster(from, to) {
   const { user_id } = await get(`${WM}/user`);
   const hosts = (await get(`${WM}/user/${user_id}/hosts`)).hosts ?? [];
-  const host = hosts.find((h) => new URL(h.ascii_host_url).hostname.replace(/^www\./, "") === HOST);
-  if (!host) return { error: `Сайт ${HOST} не добавлен в Вебмастер этого аккаунта. Есть: ${hosts.map((h) => h.ascii_host_url).join(", ") || "нет"}` };
+  // У сайта бывает несколько записей (http/https, www) — берём ту, по которой Вебмастер уже собрал данные
+  const cands = hosts.filter((h) => new URL(h.ascii_host_url).hostname.replace(/^www\./, "") === HOST)
+    .sort((a, b) => Number(b.verified) - Number(a.verified) || Number(b.ascii_host_url.startsWith("https")) - Number(a.ascii_host_url.startsWith("https")));
+  if (!cands.length) return { error: `Сайт ${HOST} не добавлен в Вебмастер этого аккаунта. Есть: ${hosts.map((h) => h.ascii_host_url).join(", ") || "нет"}` };
+  let host = cands[0], first = null;
+  for (const h of cands) {
+    const r = await safe(get(`${WM}/user/${user_id}/hosts/${encodeURIComponent(h.host_id)}/summary`));
+    if (!r.error) { host = h; first = r; break; }
+    first ??= r;
+  }
   const base = `${WM}/user/${user_id}/hosts/${encodeURIComponent(host.host_id)}`;
   const ind = ["TOTAL_SHOWS", "TOTAL_CLICKS", "AVG_SHOW_POSITION", "AVG_CLICK_POSITION"];
   const [summary, queries, history, indexing, inSearch, sitemaps, diagnostics] = await Promise.all([
-    safe(get(`${base}/summary`)),
+    Promise.resolve(first),
     safe(get(`${base}/search-queries/popular?${qs({ order_by: "TOTAL_SHOWS", query_indicator: ind, date_from: from, date_to: to, limit: 500 })}`)),
     safe(get(`${base}/search-queries/all/history?${qs({ query_indicator: ["TOTAL_SHOWS", "TOTAL_CLICKS"], date_from: from, date_to: to })}`)),
     safe(get(`${base}/indexing/history?${qs({ date_from: from, date_to: to })}`)),
@@ -52,7 +60,7 @@ async function webmaster(from, to) {
     safe(get(`${base}/sitemaps`)),
     safe(get(`${base}/diagnostics`)),
   ]);
-  return { host: host.ascii_host_url, verified: host.verified, summary, queries, history, indexing, inSearch, sitemaps, diagnostics };
+  return { host: host.ascii_host_url, verified: host.verified, candidates: cands.map((h) => `${h.ascii_host_url} verified=${h.verified}`), summary, queries, history, indexing, inSearch, sitemaps, diagnostics };
 }
 
 async function metrika(from, to) {
