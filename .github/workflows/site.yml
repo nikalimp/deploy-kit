@@ -31,8 +31,10 @@ on:
       noindex:       { type: string, default: "" }         # устарело с 21.10.2026, не используется — оставлено, чтобы старые deploy.yml не падали
       build_command: { type: string, default: "" }         # пусто — npm run check, если он есть, иначе npm run build
       ref:           { type: string, default: "" }         # ветка для выкладки; из pr.yml после автослияния — main
+      server_config: { type: string, default: "" }         # путь на сервере для настроек из секрета SERVER_CONFIG, напр. "api/config.php" (PHP-массив); добавь его в rsync_exclude
       pagespeed:     { type: string, default: "90" }       # порог мобильного Lighthouse Performance; ниже — предупреждение и сводка (стандарт §6.6); "" — не мерить
     secrets:
+      SERVER_CONFIG: { required: false }  # строки KEY=VALUE → <?php return [...]; на сервер в inputs.server_config (токены форм) — не в git и не в артефакт
       BUILD_ENV: { required: false }  # строки KEY=VALUE для сборки (публичные ключи NEXT_PUBLIC_*), пишутся в .env.production.local — не в git
       SSH_KEY: { required: false }
       SSH_HOST: { required: false }
@@ -211,6 +213,41 @@ jobs:
         run: |
           echo "::notice::Выкладка: FTP (SSH не прошёл или адаптер ftp)"
           echo "- ✓ выкладка по FTP" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Настройки формы на сервере: секрет SERVER_CONFIG (KEY=VALUE по строке) → PHP-массив в inputs.server_config.
+      #    Файл не попадает ни в git, ни в артефакт site-build (публичный репозиторий) — только на сервер, тем же путём, что выкладка.
+      - name: Настройки на сервере (SERVER_CONFIG)
+        if: inputs.server_config != '' && (inputs.adapter == 'ftp' || env.SSH_FIRST == 'true')
+        env:
+          SERVER_CONFIG: ${{ secrets.SERVER_CONFIG }}
+          TARGET: ${{ inputs.server_config }}
+          SSH_OK: ${{ steps.ssh.outcome == 'success' }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SITE_DIR: ${{ secrets.SITE_DIR }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_DIR: ${{ secrets.FTP_DIR }}
+          APP_PATH: ${{ inputs.app_path }}
+        run: |
+          [ -z "$SERVER_CONFIG" ] && { echo "::warning::Нет секрета SERVER_CONFIG — $TARGET на сервере не обновлён"; exit 0; }
+          F="${RUNNER_TEMP}/server-config.php"
+          node -e '
+            const lines=process.env.SERVER_CONFIG.split(/\r?\n/).map(l=>l.trim()).filter(l=>l&&!l.startsWith("#")&&l.includes("="));
+            const q=v=>"\x27"+v.replace(/\\/g,"\\\\").replace(/\x27/g,"\\\x27")+"\x27";
+            const body=lines.map(l=>{const i=l.indexOf("=");return "  "+q(l.slice(0,i).trim())+" => "+q(l.slice(i+1).trim())+",";}).join("\n");
+            require("fs").writeFileSync(process.argv[1],"<?php\n// Сгенерировано deploy-kit из секрета SERVER_CONFIG. Правки — в секрете, не здесь.\nreturn [\n"+body+"\n];\n");
+          ' "$F"
+          php -l "$F" >/dev/null 2>&1 || echo "::warning::php -l недоступен или файл с ошибкой"
+          if [ "$SSH_OK" = "true" ]; then
+            KEY="${RUNNER_TEMP:-$HOME/.ssh}/deploy_key"
+            scp -i "$KEY" -o BatchMode=yes "$F" "$SSH_USER@$SSH_HOST:${SITE_DIR%/}/${APP_PATH}${TARGET}" && echo "::notice::Настройки: $TARGET обновлён по SSH"
+          else
+            d="${FTP_DIR:-}"; [ -n "$d" ] && [ "${d%/}" = "$d" ] && d="$d/"
+            curl -sS --ftp-create-dirs -T "$F" --user "$FTP_USER:$FTP_PASS" "ftp://$FTP_HOST/${d}${APP_PATH}${TARGET}" && echo "::notice::Настройки: $TARGET обновлён по FTP"
+          fi
+          rm -f "$F"
 
       - name: Выкладка — s3 (Yandex Object Storage)
         if: inputs.adapter == 's3'
