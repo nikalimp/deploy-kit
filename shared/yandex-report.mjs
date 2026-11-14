@@ -41,7 +41,7 @@ async function webmaster(from, to) {
   const hosts = (await get(`${WM}/user/${user_id}/hosts`)).hosts ?? [];
   // У сайта бывает несколько записей (http/https, www) — берём ту, по которой Вебмастер уже собрал данные
   const cands = hosts.filter((h) => new URL(h.ascii_host_url).hostname.replace(/^www\./, "") === HOST)
-    .sort((a, b) => Number(b.verified) - Number(a.verified) || Number(b.ascii_host_url.startsWith("https")) - Number(a.ascii_host_url.startsWith("https")));
+    .sort((a, b) => Number(b.ascii_host_url.startsWith("https")) - Number(a.ascii_host_url.startsWith("https")) || Number(b.verified) - Number(a.verified));
   if (!cands.length) return { error: `Сайт ${HOST} не добавлен в Вебмастер этого аккаунта. Есть: ${hosts.map((h) => h.ascii_host_url).join(", ") || "нет"}` };
   let host = cands[0], first = null;
   for (const h of cands) {
@@ -60,7 +60,16 @@ async function webmaster(from, to) {
     safe(get(`${base}/sitemaps`)),
     safe(get(`${base}/diagnostics`)),
   ]);
-  return { host: host.ascii_host_url, verified: host.verified, candidates: cands.map((h) => `${h.ascii_host_url} verified=${h.verified}`), summary, queries, history, indexing, inSearch, sitemaps, diagnostics };
+  // Нет ни одного sitemap — добавляем адрес из robots.txt (право webmaster:verify у приложения есть)
+  let sitemapAdded = null;
+  if (!sitemaps.error && !(sitemaps.sitemaps ?? []).length) {
+    const robots = await fetch(`https://${HOST}/robots.txt`).then((r) => r.text()).catch(() => "");
+    const url = robots.match(/^\s*sitemap:\s*(\S+)/im)?.[1] || `https://${HOST}/sitemap.xml`;
+    const r = await fetch(`${base}/user-added-sitemaps`, { method: "POST", headers: { Authorization: `OAuth ${TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    sitemapAdded = { url, status: r.status, body: (await r.text()).slice(0, 200) };
+    console.log(r.ok ? `::notice::Вебмастер: добавлен sitemap ${url}` : `::warning::Вебмастер: не удалось добавить sitemap ${url} — ${r.status}`);
+  }
+  return { host: host.ascii_host_url, sitemapAdded, verified: host.verified, candidates: cands.map((h) => `${h.ascii_host_url} verified=${h.verified}`), summary, queries, history, indexing, inSearch, sitemaps, diagnostics };
 }
 
 async function metrika(from, to) {
