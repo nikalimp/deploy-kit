@@ -31,11 +31,19 @@ on:
       noindex:       { type: string, default: "" }         # устарело с 21.10.2026, не используется — оставлено, чтобы старые deploy.yml не падали
       build_command: { type: string, default: "" }         # пусто — npm run check, если он есть, иначе npm run build
       ref:           { type: string, default: "" }         # ветка для выкладки; из pr.yml после автослияния — main
-      server_config: { type: string, default: "" }         # путь на сервере для настроек из секрета SERVER_CONFIG, напр. "api/config.php" (PHP-массив); добавь его в rsync_exclude
+      server_config: { type: string, default: "" }         # путь на сервере для настроек формы из секретов LEAD_*, напр. "api/config.php" (PHP-массив); добавь его в rsync_exclude
       pagespeed:     { type: string, default: "90" }       # порог мобильного Lighthouse Performance; ниже — предупреждение и сводка (стандарт §6.6); "" — не мерить
     secrets:
-      SERVER_CONFIG: { required: false }  # строки KEY=VALUE → <?php return [...]; на сервер в inputs.server_config (токены форм) — не в git и не в артефакт
-      BUILD_ENV: { required: false }  # строки KEY=VALUE для сборки (публичные ключи NEXT_PUBLIC_*), пишутся в .env.production.local — не в git
+      # Секреты — всегда по одному на значение (стандарт «Публикация» §5б). При secrets: inherit берутся сами по префиксу:
+      #   NEXT_PUBLIC_* → .env.production.local для сборки;  LEAD_* → api/config.php на сервере (LEAD_TG_TOKEN → 'tg_token').
+      # Проекту, который передаёт секреты списком, — объявленные ниже.
+      NEXT_PUBLIC_PSI_KEY: { required: false }
+      LEAD_EMAIL_TO: { required: false }
+      LEAD_EMAIL_FROM: { required: false }
+      LEAD_TG_TOKEN: { required: false }
+      LEAD_TG_CHAT: { required: false }
+      LEAD_SALT: { required: false }
+      BUILD_ENV: { required: false }  # устарело с 14.11.2026: несколько значений в одном секрете — замени на отдельные NEXT_PUBLIC_*
       SSH_KEY: { required: false }
       SSH_HOST: { required: false }
       SSH_USER: { required: false }
@@ -116,13 +124,24 @@ jobs:
             else echo "deploy-kit/shared/$name недоступен — копия проекта"; fi
           done
 
+      # Отдельный шаг: все секреты видит только он, в сборку (npm) попадают лишь NEXT_PUBLIC_* — публичные ключи браузера.
+      - name: Ключи сборки (секреты NEXT_PUBLIC_*)
+        if: inputs.adapter != 'tilda'
+        env:
+          ALL: ${{ toJSON(secrets) }}
+        run: |
+          node -e '
+            const a=JSON.parse(process.env.ALL||"{}"), k=Object.keys(a).filter(x=>x.startsWith("NEXT_PUBLIC_")&&a[x]);
+            if(k.length){require("fs").appendFileSync(".env.production.local",k.map(x=>x+"="+a[x]).join("\n")+"\n");console.log("::notice::Ключи сборки: "+k.join(", "));}
+          '
+
       - name: Проверка и сборка
         if: inputs.adapter != 'tilda'
         env:
           BUILD: ${{ inputs.build_command }}
           BUILD_ENV: ${{ secrets.BUILD_ENV }}
         run: |
-          if [ -n "$BUILD_ENV" ]; then printf '%s\n' "$BUILD_ENV" > .env.production.local; echo "::notice::BUILD_ENV → .env.production.local ($(grep -c = .env.production.local) знач.)"; fi
+          if [ -n "$BUILD_ENV" ]; then printf '%s\n' "$BUILD_ENV" >> .env.production.local; echo "::warning::BUILD_ENV устарел — разложи значения по отдельным секретам NEXT_PUBLIC_*"; fi
           if [ -n "$BUILD" ]; then eval "$BUILD"
           elif npm run | grep -q "^  check$"; then npm run check
           else npm run build; fi
@@ -214,12 +233,12 @@ jobs:
           echo "::notice::Выкладка: FTP (SSH не прошёл или адаптер ftp)"
           echo "- ✓ выкладка по FTP" >> "$GITHUB_STEP_SUMMARY"
 
-      # ── Настройки формы на сервере: секрет SERVER_CONFIG (KEY=VALUE по строке) → PHP-массив в inputs.server_config.
+      # ── Настройки формы на сервере: отдельные секреты LEAD_* → PHP-массив в inputs.server_config (LEAD_TG_TOKEN → 'tg_token').
       #    Файл не попадает ни в git, ни в артефакт site-build (публичный репозиторий) — только на сервер, тем же путём, что выкладка.
-      - name: Настройки на сервере (SERVER_CONFIG)
+      - name: Настройки формы на сервере (секреты LEAD_*)
         if: inputs.server_config != '' && (inputs.adapter == 'ftp' || env.SSH_FIRST == 'true')
         env:
-          SERVER_CONFIG: ${{ secrets.SERVER_CONFIG }}
+          ALL: ${{ toJSON(secrets) }}
           TARGET: ${{ inputs.server_config }}
           SSH_OK: ${{ steps.ssh.outcome == 'success' }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -231,21 +250,22 @@ jobs:
           FTP_DIR: ${{ secrets.FTP_DIR }}
           APP_PATH: ${{ inputs.app_path }}
         run: |
-          [ -z "$SERVER_CONFIG" ] && { echo "::warning::Нет секрета SERVER_CONFIG — $TARGET на сервере не обновлён"; exit 0; }
           F="${RUNNER_TEMP}/server-config.php"
           node -e '
-            const lines=process.env.SERVER_CONFIG.split(/\r?\n/).map(l=>l.trim()).filter(l=>l&&!l.startsWith("#")&&l.includes("="));
-            const q=v=>"\x27"+v.replace(/\\/g,"\\\\").replace(/\x27/g,"\\\x27")+"\x27";
-            const body=lines.map(l=>{const i=l.indexOf("=");return "  "+q(l.slice(0,i).trim())+" => "+q(l.slice(i+1).trim())+",";}).join("\n");
-            require("fs").writeFileSync(process.argv[1],"<?php\n// Сгенерировано deploy-kit из секрета SERVER_CONFIG. Правки — в секрете, не здесь.\nreturn [\n"+body+"\n];\n");
+            const a=JSON.parse(process.env.ALL||"{}"), k=Object.keys(a).filter(x=>x.startsWith("LEAD_")&&a[x]);
+            if(!k.length){console.log("::warning::Нет секретов LEAD_* — "+process.env.TARGET+" на сервере не обновлён");process.exit(0);}
+            const q=v=>"\x27"+String(v).replace(/\\/g,"\\\\").replace(/\x27/g,"\\\x27")+"\x27";
+            const body=k.map(x=>"  "+q(x.slice(5).toLowerCase())+" => "+q(a[x].trim())+",").join("\n");
+            require("fs").writeFileSync(process.argv[1],"<?php\n// Сгенерировано deploy-kit из секретов LEAD_*. Правки — в секретах репозитория, не здесь.\nreturn [\n"+body+"\n];\n");
+            console.log("::notice::Настройки формы: "+k.join(", "));
           ' "$F"
-          php -l "$F" >/dev/null 2>&1 || echo "::warning::php -l недоступен или файл с ошибкой"
+          [ -f "$F" ] || exit 0
           if [ "$SSH_OK" = "true" ]; then
             KEY="${RUNNER_TEMP:-$HOME/.ssh}/deploy_key"
-            scp -i "$KEY" -o BatchMode=yes "$F" "$SSH_USER@$SSH_HOST:${SITE_DIR%/}/${APP_PATH}${TARGET}" && echo "::notice::Настройки: $TARGET обновлён по SSH"
+            scp -i "$KEY" -o BatchMode=yes "$F" "$SSH_USER@$SSH_HOST:${SITE_DIR%/}/${APP_PATH}${TARGET}" && echo "::notice::$TARGET обновлён по SSH"
           else
             d="${FTP_DIR:-}"; [ -n "$d" ] && [ "${d%/}" = "$d" ] && d="$d/"
-            curl -sS --ftp-create-dirs -T "$F" --user "$FTP_USER:$FTP_PASS" "ftp://$FTP_HOST/${d}${APP_PATH}${TARGET}" && echo "::notice::Настройки: $TARGET обновлён по FTP"
+            curl -sS --ftp-create-dirs -T "$F" --user "$FTP_USER:$FTP_PASS" "ftp://$FTP_HOST/${d}${APP_PATH}${TARGET}" && echo "::notice::$TARGET обновлён по FTP"
           fi
           rm -f "$F"
 
