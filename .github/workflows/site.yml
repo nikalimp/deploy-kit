@@ -262,8 +262,10 @@ jobs:
             const r=require("/tmp/lh.json"), c=r.categories, s=k=>Math.round((c[k]?.score||0)*100), a=r.audits;
             const perf=s("performance"), min=+process.env.MIN;
             const line=`PageSpeed mobile: Performance ${perf}, Accessibility ${s("accessibility")}, Best Practices ${s("best-practices")}, SEO ${s("seo")} · LCP ${a["largest-contentful-paint"]?.displayValue} · CLS ${a["cumulative-layout-shift"]?.displayValue} · TBT ${a["total-blocking-time"]?.displayValue}`;
-            console.log((perf<min?"::warning::":"::notice::")+line+(perf<min?` — ниже ${min}, задача на исправление (стандарт §6.6)`:""));
             const top=Object.values(a).filter(x=>x.details?.type==="opportunity"&&x.score!==null&&x.score<0.9).sort((x,y)=>(y.numericValue||0)-(x.numericValue||0)).slice(0,5);
+            // топ-3 причины — прямо в аннотации: недельному аудиту не нужно перезапускать Lighthouse
+            const why=top.slice(0,3).map(x=>`${x.title}${x.displayValue?` (${x.displayValue})`:""}`).join("; ");
+            console.log((perf<min?"::warning::":"::notice::")+line+(perf<min?` — ниже ${min}, задача на исправление (стандарт §6.6). Причины: ${why||"нет данных"}`:""));
             require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY,`### ${line}\n`+top.map(x=>`- ${x.title}: ${x.displayValue||""}`).join("\n")+"\n");
           '
 
