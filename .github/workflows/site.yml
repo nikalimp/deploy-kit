@@ -10,6 +10,18 @@
 # Workflow падает, только если не сработали SSH и FTP. Последний шаг — сайт отвечает 200.
 # Другие адаптеры: ftp (только FTP), s3 (Yandex Object Storage и любой S3), manual-zip, tilda.
 #
+# Тест и прод параллельно (с 2.0.0, 20.11.2026; стандарт — раздел «Тест и прод параллельно»):
+#   вход target: test | prod. Адрес, папка выкладки и индексация берутся из publish.json → targets.<цель>:
+#     "targets": { "test": { "url": "https://client.nikalimp.ru", "ftp_dir_secret": "FTP_DIR",      "indexable": false },
+#                  "prod": { "url": "https://client.ru",           "ftp_dir_secret": "FTP_DIR_PROD", "indexable": true } }
+#   Перед сборкой — SITE_URL (боевой домен, если есть targets.prod, иначе адрес цели), SITE_TARGET, SITE_INDEXABLE
+#   и они же с префиксом NEXT_PUBLIC_. После `npm run check` — shared/target-build.mjs: тест закрыт от поисковиков
+#   (noindex, robots.txt Disallow: /, без Метрики и верификаций), прод — обычный боевой сайт. Потом проверка цели:
+#   главная, sitemap.xml, robots.txt, llms.txt — 200, несуществующая страница — 404, noindex есть только на тесте.
+#   Нет targets.prod или секрета его папки — цель prod пропускается (выход skipped=true).
+#   FTP-логин и пароль общие (FTP_HOST, FTP_USER, FTP_PASS), разные только папки (секреты из ftp_dir_secret).
+#   Без входа target (старые deploy.yml) — всё как до 2.0.0: адрес из входа url, папка из FTP_DIR, сборка без правок.
+#
 # Вызывающий workflow обязан дать job права: permissions: { contents: write } — иначе запуск падает со startup_failure
 # («nested job 'deploy' is requesting 'contents: write', but is only allowed 'contents: read'»).
 # Доступ из других репозиториев: deploy-kit → Settings → Actions → General → Access →
@@ -33,6 +45,19 @@ on:
       ref:           { type: string, default: "" }         # ветка для выкладки; из pr.yml после автослияния — main
       server_config: { type: string, default: "" }         # путь на сервере для настроек формы из секретов LEAD_*, напр. "api/config.php" (PHP-массив); добавь его в rsync_exclude
       pagespeed:     { type: string, default: "90" }       # порог мобильного Lighthouse Performance; ниже — предупреждение и сводка (стандарт §6.6); "" — не мерить
+      target:        { type: string, default: "" }         # test | prod — цель из publish.json → targets; пусто — как до 2.0.0 (url и FTP_DIR)
+      publish_json:  { type: string, default: "publish.json" } # паспорт публикации от корня репозитория
+      kit_ref:       { type: string, default: "main" }     # ветка deploy-kit, откуда берётся shared/target-build.mjs (для проверки ветки deploy-kit)
+    outputs:
+      skipped:
+        description: "true — цели нет в publish.json или нет секрета её папки: выкладки не было"
+        value: ${{ jobs.plan.outputs.skipped }}
+      sha:
+        description: "коммит, который собран и выложен, — по нему выкладывается прод"
+        value: ${{ jobs.plan.outputs.sha }}
+      url:
+        description: "адрес цели"
+        value: ${{ jobs.plan.outputs.url }}
     secrets:
       # Секреты — всегда по одному на значение (стандарт «Публикация» §5б). При secrets: inherit берутся сами по префиксу:
       #   NEXT_PUBLIC_* → .env.production.local для сборки;  LEAD_* → api/config.php на сервере (LEAD_TG_TOKEN → 'tg_token').
@@ -53,6 +78,8 @@ on:
       FTP_USER: { required: false }
       FTP_PASS: { required: false }
       FTP_DIR: { required: false }           # относительно корня FTP; слеш на конце добавится сам. REG.RU (основной аккаунт): www/<домен>/
+      FTP_DIR_PROD: { required: false }      # папка прода (targets.prod.ftp_dir_secret), напр. www/client.ru/
+      SITE_DIR_PROD: { required: false }     # абсолютная папка прода для SSH (targets.prod.ssh_dir_secret), если SSH из Actions работает
       S3_BUCKET: { required: false }
       S3_ACCESS_KEY_ID: { required: false }
       S3_SECRET_ACCESS_KEY: { required: false }
@@ -67,7 +94,82 @@ on:
       NOTIFY_CHAT_ID: { required: false }
 
 jobs:
+  # Цель выкладки: адрес, секреты папок, индексация — из publish.json. Секреты здесь только проверяются на наличие.
+  plan:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      skipped: ${{ steps.plan.outputs.skipped }}
+      mode: ${{ steps.plan.outputs.mode }}
+      url: ${{ steps.plan.outputs.url }}
+      site_url: ${{ steps.plan.outputs.site_url }}
+      aliases: ${{ steps.plan.outputs.aliases }}
+      indexable: ${{ steps.plan.outputs.indexable }}
+      primary: ${{ steps.plan.outputs.primary }}
+      ftp_secret: ${{ steps.plan.outputs.ftp_secret }}
+      ssh_secret: ${{ steps.plan.outputs.ssh_secret }}
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: "${{ inputs.ref }}"
+          sparse-checkout: ${{ inputs.publish_json }}
+          sparse-checkout-cone-mode: false
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Цель выкладки
+        id: plan
+        env:
+          TARGET: ${{ inputs.target }}
+          PJ: ${{ inputs.publish_json }}
+          URL_IN: ${{ inputs.url }}
+          ALL: ${{ toJSON(secrets) }}
+        run: |
+          node -e '
+            const fs=require("fs"), out=[], set=(k,v)=>out.push(`${k}=${v}`);
+            const t=process.env.TARGET, secrets=JSON.parse(process.env.ALL||"{}"), has=n=>!!(secrets[n]||"").trim();
+            let p={}; try{p=JSON.parse(fs.readFileSync(process.env.PJ,"utf8"))}catch{}
+            const T=p.targets&&typeof p.targets==="object"?p.targets:null, strip=u=>String(u||"").replace(/\/+$/,"");
+            const legacy=()=>{set("mode","legacy");set("url",process.env.URL_IN);set("site_url","");set("aliases","");set("indexable","");set("primary","true");set("ftp_secret","FTP_DIR");set("ssh_secret","SITE_DIR");set("skipped","false");};
+            if(!t) legacy();
+            else if(!["test","prod"].includes(t)){console.log(`::error::target=${t}: нужно test или prod`);process.exit(1);}
+            else if(!T){
+              if(t==="prod"){set("skipped","true");console.log("::notice::В publish.json нет targets — выкладка на прод пропущена");}
+              else {legacy();console.log("::notice::В publish.json нет targets — выкладка как до 2.0.0 (url и FTP_DIR)");}
+            } else if(!T[t]||!T[t].url){
+              set("skipped","true");console.log(`::notice::В publish.json нет targets.${t} — выкладка на ${t} пропущена`);
+            } else {
+              const x=T[t], url=strip(x.url), prod=T.prod&&T.prod.url?strip(T.prod.url):"";
+              const ftp=x.ftp_dir_secret||(t==="prod"?"FTP_DIR_PROD":"FTP_DIR"), ssh=x.ssh_dir_secret||(t==="prod"?"SITE_DIR_PROD":"SITE_DIR");
+              const indexable=typeof x.indexable==="boolean"?x.indexable:t==="prod";
+              const siteUrl=prod||url, aliases=Object.values(T).map(y=>strip(y&&y.url)).filter(u=>u&&u!==siteUrl);
+              if(t==="prod"&&!has(ftp)&&!has(ssh)){
+                set("skipped","true");set("missing",ftp);
+                console.log(`::warning::Нет секрета ${ftp} (папка прода) — выкладка на прод пропущена. Ник добавляет его в Settings → Secrets → Actions`);
+              } else {
+                set("skipped","false");set("mode","target");set("url",url);set("site_url",siteUrl);set("aliases",aliases.join(" "));
+                set("indexable",String(indexable));set("primary",String(t==="prod"||!prod));set("ftp_secret",ftp);set("ssh_secret",ssh);
+                console.log(`::notice::Цель ${t}: ${url} · ${indexable?"индексируется":"закрыта от поисковиков"} · canonical ${siteUrl} · папка из секрета ${ftp}`);
+              }
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,out.join("\n")+"\n");
+          '
+      - name: Сообщить Нику — нет секрета прода
+        if: steps.plan.outputs.missing != ''
+        env:
+          T: ${{ secrets.NOTIFY_BOT_TOKEN }}
+          C: ${{ secrets.NOTIFY_CHAT_ID }}
+          MISSING: ${{ steps.plan.outputs.missing }}
+        run: |
+          [ -z "$T" ] && exit 0
+          curl -s "https://api.telegram.org/bot$T/sendMessage" -d chat_id="$C" \
+            --data-urlencode text="⚠️ ${GITHUB_REPOSITORY}: прод не выложен — нет секрета $MISSING (папка прода). Тест обновлён. ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+
   deploy:
+    needs: plan
+    if: needs.plan.outputs.skipped != 'true'
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 60 # первая заливка крупного раздела (1000+ новых страниц) по rsync идёт дольше 25 минут
     permissions:
@@ -75,12 +177,43 @@ jobs:
     env:
       MEDIA_BRAND: ${{ inputs.media_brand }}
       SSH_FIRST: ${{ inputs.adapter == 'ssh-ftp' || inputs.adapter == 'ssh-rsync' }}
+      MODE: ${{ needs.plan.outputs.mode }}             # legacy — как до 2.0.0; target — цель из publish.json
+      TARGET_URL: ${{ needs.plan.outputs.url }}
+      INDEXABLE: ${{ needs.plan.outputs.indexable }}   # false — тест: noindex, robots Disallow, без счётчиков
+      PRIMARY: ${{ needs.plan.outputs.primary }}       # true — с этой цели уходят IndexNow, каналы и PageSpeed
     defaults:
       run:
         working-directory: ${{ inputs.site_dir }}
     steps:
       - uses: actions/checkout@v5
-        with: { fetch-depth: 50, ref: "${{ inputs.ref }}" }
+        with: { fetch-depth: 50, ref: "${{ needs.plan.outputs.sha }}" }
+
+      # Папки цели — из секретов, имена которых дал plan (FTP_DIR / FTP_DIR_PROD; SITE_DIR / SITE_DIR_PROD для SSH).
+      # Значения идут в окружение следующих шагов; в журнале Actions их скрывает маска секретов.
+      - name: Папки выкладки
+        if: inputs.adapter != 'tilda'
+        env:
+          ALL: ${{ toJSON(secrets) }}
+          FTP_NAME: ${{ needs.plan.outputs.ftp_secret }}
+          SSH_NAME: ${{ needs.plan.outputs.ssh_secret }}
+        run: |
+          node -e '
+            const a=JSON.parse(process.env.ALL||"{}"), v=n=>String(a[n]||"").trim();
+            require("fs").appendFileSync(process.env.GITHUB_ENV,`TARGET_FTP_DIR=${v(process.env.FTP_NAME)}\nTARGET_SITE_DIR=${v(process.env.SSH_NAME)}\n`);
+          '
+
+      # Сборка под цель: адрес и индексация известны коду сайта (Next.js — через NEXT_PUBLIC_*). Только для входа target.
+      - name: Цель сборки (SITE_URL, SITE_TARGET, SITE_INDEXABLE)
+        if: env.MODE == 'target'
+        env:
+          SITE_URL: ${{ needs.plan.outputs.site_url }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          {
+            echo "SITE_URL=$SITE_URL"; echo "SITE_TARGET=$TARGET"; echo "SITE_INDEXABLE=$INDEXABLE"; echo "SITE_DEPLOY_URL=$TARGET_URL"
+            echo "NEXT_PUBLIC_SITE_URL=$SITE_URL"; echo "NEXT_PUBLIC_SITE_TARGET=$TARGET"; echo "NEXT_PUBLIC_SITE_INDEXABLE=$INDEXABLE"
+          } >> "$GITHUB_ENV"
+          echo "::notice::Сборка «$TARGET»: SITE_URL=$SITE_URL, индексация — $INDEXABLE"
 
       - name: Tilda — выкладку делает Tilda MCP
         if: inputs.adapter == 'tilda'
@@ -146,8 +279,22 @@ jobs:
           elif npm run | grep -q "^  check$"; then npm run check
           else npm run build; fi
 
+      # Тест закрывается от поисковиков после строгой проверки: check идёт по обычной сборке, правится уже готовая папка.
+      - name: Сборка под цель (shared/target-build.mjs)
+        if: env.MODE == 'target' && inputs.adapter != 'tilda'
+        env:
+          KIT_REF: ${{ inputs.kit_ref }}
+          OUT: ${{ inputs.out_dir }}
+          TARGET: ${{ inputs.target }}
+          SITE_URL_C: ${{ needs.plan.outputs.site_url }}
+          ALIASES: ${{ needs.plan.outputs.aliases }}
+        run: |
+          curl -fsSL --max-time 30 "https://raw.githubusercontent.com/nikalimp/deploy-kit/$KIT_REF/shared/target-build.mjs" -o "$RUNNER_TEMP/target-build.mjs" \
+            || { echo "::error::Не скачался deploy-kit/shared/target-build.mjs — без него тест нельзя закрыть от поисковиков"; exit 1; }
+          node "$RUNNER_TEMP/target-build.mjs" --out "$OUT" --target "$TARGET" --indexable "$INDEXABLE" --site-url "$SITE_URL_C" --alias "$ALIASES"
+
       - name: IndexNow — что изменилось
-        if: inputs.adapter != 'tilda'
+        if: inputs.adapter != 'tilda' && env.INDEXABLE != 'false' && env.PRIMARY == 'true'
         run: |
           if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs prepare; else echo "нет indexnow.mjs"; fi
 
@@ -172,13 +319,13 @@ jobs:
           SSH_KEY: ${{ secrets.SSH_KEY }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SITE_DIR: ${{ secrets.SITE_DIR }}
+          SITE_DIR: ${{ env.TARGET_SITE_DIR }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
           APP_PATH: ${{ inputs.app_path }}
           EXCLUDE: ${{ inputs.rsync_exclude }}
           OUT: ${{ inputs.out_dir }}
         run: |
-          [ -z "$SSH_KEY" ] || [ -z "$SITE_DIR" ] && { echo "::warning::Нет SSH_KEY или SITE_DIR — пробуем FTP"; exit 1; }
+          [ -z "$SSH_KEY" ] || [ -z "$SITE_DIR" ] && { echo "::warning::Нет SSH_KEY или папки цели для SSH — пробуем FTP"; exit 1; }
           # ключ — во временной папке раннера: на своём Mac не трогаем ~/.ssh
           KEY="${RUNNER_TEMP:-$HOME/.ssh}/deploy_key"; mkdir -p ~/.ssh "$(dirname "$KEY")"; echo "$SSH_KEY" > "$KEY"; chmod 600 "$KEY"
           [ -n "$SSH_KNOWN_HOSTS" ] && echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
@@ -203,9 +350,10 @@ jobs:
       - name: FTP — папка на сервере
         if: inputs.adapter == 'ftp' || (env.SSH_FIRST == 'true' && steps.ssh.outcome == 'failure')
         env:
-          FTP_DIR: ${{ secrets.FTP_DIR }}
+          FTP_DIR: ${{ env.TARGET_FTP_DIR }}
           APP_PATH: ${{ inputs.app_path }}
         run: |
+          [ "$MODE" = "target" ] && [ -z "$FTP_DIR" ] && { echo "::error::Пустой секрет папки FTP для цели — выкладка в корень FTP запрещена"; exit 1; }
           d="${FTP_DIR:-./}"; [ "${d%/}" = "$d" ] && d="$d/"
           a="$APP_PATH"; [ -n "$a" ] && [ "${a%/}" = "$a" ] && a="$a/"
           echo "FTP_SERVER_DIR=$d$a" >> "$GITHUB_ENV"
@@ -243,11 +391,11 @@ jobs:
           SSH_OK: ${{ steps.ssh.outcome == 'success' }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SITE_DIR: ${{ secrets.SITE_DIR }}
+          SITE_DIR: ${{ env.TARGET_SITE_DIR }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
-          FTP_DIR: ${{ secrets.FTP_DIR }}
+          FTP_DIR: ${{ env.TARGET_FTP_DIR }}
           APP_PATH: ${{ inputs.app_path }}
         run: |
           F="${RUNNER_TEMP}/server-config.php"
@@ -290,9 +438,9 @@ jobs:
         run: echo "Скачай артефакт site-build в этом запуске и залей в панель хостинга (или scripts/deploy-<app>.sh с Mac)."
 
       - name: Сайт отвечает
-        if: inputs.url != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        if: env.TARGET_URL != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
         env:
-          URL: ${{ inputs.url }}
+          URL: ${{ env.TARGET_URL }}
           APP_PATH: ${{ inputs.app_path }}
         run: |
           U="${URL%/}/${APP_PATH}"
@@ -302,11 +450,38 @@ jobs:
           done
           echo "::error::Сайт ответил $code"; exit 1
 
+      # Проверка цели после выкладки (вход target): красная — следующая цель не выкладывается, Нику — сообщение.
+      - name: Проверка цели — страницы, 404, индексация
+        if: env.MODE == 'target' && env.TARGET_URL != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        env:
+          APP_PATH: ${{ inputs.app_path }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          U="${TARGET_URL%/}/${APP_PATH}"; U="${U%/}"; bad=0
+          get() { curl -sk -o "$2" -w "%{http_code}" --max-time 25 -H "Cache-Control: no-cache" "$1" || echo 000; }
+          for p in / /sitemap.xml /robots.txt /llms.txt; do
+            c=$(get "$U$p?nocache=$GITHUB_RUN_ID" /tmp/page); echo "$U$p: $c"
+            [ "$c" = "200" ] || { echo "::error::$TARGET: $U$p ответил $c (нужно 200)"; bad=1; }
+            [ "$p" = "/" ] && cp /tmp/page /tmp/home.html
+            [ "$p" = "/robots.txt" ] && cp /tmp/page /tmp/robots.txt
+          done
+          c=$(get "$U/nikitos-404-check-$GITHUB_RUN_ID/" /tmp/page); echo "404-проверка: $c"
+          [ "$c" = "404" ] || { echo "::error::$TARGET: несуществующая страница ответила $c (нужно 404)"; bad=1; }
+          if grep -qiE '<meta[^>]+name="?robots"?[^>]+noindex' /tmp/home.html 2>/dev/null; then noindex=true; else noindex=false; fi
+          if [ "$INDEXABLE" = "false" ]; then
+            [ "$noindex" = "true" ] || { echo "::error::$TARGET: на главной нет noindex — тест открыт поисковикам"; bad=1; }
+            grep -qE '^Disallow:[[:space:]]*/[[:space:]]*$' /tmp/robots.txt || { echo "::error::$TARGET: robots.txt не закрывает сайт"; bad=1; }
+          else
+            [ "$noindex" = "false" ] || { echo "::error::$TARGET: на главной noindex — боевой сайт закрыт от поисковиков"; bad=1; }
+          fi
+          [ "$bad" = 0 ] && { echo "::notice::Проверка $TARGET пройдена: страницы 200, 404 на месте, noindex — $noindex"; echo "- ✓ проверка $TARGET ($U): 200, 404, noindex=$noindex" >> "$GITHUB_STEP_SUMMARY"; }
+          exit "$bad"
+
       - name: PageSpeed (мобильный Lighthouse)
-        if: inputs.url != '' && inputs.pagespeed != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        if: env.TARGET_URL != '' && env.PRIMARY == 'true' && inputs.pagespeed != '' && inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
         continue-on-error: true
         env:
-          URL: ${{ inputs.url }}
+          URL: ${{ env.TARGET_URL }}
           APP_PATH: ${{ inputs.app_path }}
           MIN: ${{ inputs.pagespeed }}
         run: |
@@ -327,13 +502,14 @@ jobs:
           '
 
       - name: IndexNow — отправить
-        if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda' && env.INDEXABLE != 'false' && env.PRIMARY == 'true'
         continue-on-error: true
         run: |
           if [ -f scripts/indexnow.mjs ]; then node scripts/indexnow.mjs submit || true; fi
 
+      # Посты в каналы — один раз: с прода, а пока прода нет — с теста.
       - name: Telegram и Max
-        if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda'
+        if: inputs.adapter != 'manual-zip' && inputs.adapter != 'tilda' && env.PRIMARY == 'true'
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -350,6 +526,7 @@ jobs:
         continue-on-error: true
         env:
           REF: ${{ inputs.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           git add public/blog content/media 2>/dev/null || true
           if git diff --cached --quiet; then echo "Нечего сохранять"; exit 0; fi
@@ -359,6 +536,9 @@ jobs:
           # --autostash: сборка меняет отслеживаемые файлы (отчёт geo-check за день, типограф) — без него pull --rebase
           # отказывает, и реестр каналов не сохраняется: следующий запуск снова шлёт ту же статью в Telegram.
           BR="${REF:-$GITHUB_REF_NAME}"
+          # прод выкладывается по коммиту (sha) — сохраняем в основную ветку
+          case "$BR" in *[!0-9a-f]*|"") ;; *) [ ${#BR} -ge 7 ] && BR="$DEFAULT_BRANCH";; esac
+          case "$BR" in */merge) BR="$DEFAULT_BRANCH";; esac
           for _ in 1 2 3; do
             if git pull --rebase --autostash -X theirs origin "$BR" && git push origin "HEAD:$BR"; then
               echo "::notice::Сохранено в $BR: медиа и реестр каналов"; exit 0
@@ -373,7 +553,13 @@ jobs:
         env:
           T: ${{ secrets.NOTIFY_BOT_TOKEN }}
           C: ${{ secrets.NOTIFY_CHAT_ID }}
+          TARGET: ${{ inputs.target }}
         run: |
           [ -z "$T" ] && exit 0
+          case "$TARGET" in
+            test) what="Тест не прошёл (выкладка или проверка) — прод не тронут";;
+            prod) what="Прод: выкладка или проверка не прошла";;
+            *)    what="Выкладка упала (SSH и FTP)";;
+          esac
           curl -s "https://api.telegram.org/bot$T/sendMessage" -d chat_id="$C" \
-            --data-urlencode text="❌ Выкладка упала (SSH и FTP): ${GITHUB_REPOSITORY} — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Сборка — артефакт site-build, план 3 — scripts/deploy-*.sh с Mac." >/dev/null
+            --data-urlencode text="❌ $what: ${GITHUB_REPOSITORY} ${TARGET_URL} — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Сборка — артефакт site-build, план 3 — scripts/deploy-*.sh с Mac." >/dev/null

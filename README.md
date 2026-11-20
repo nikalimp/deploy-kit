@@ -4,18 +4,35 @@
 Общие сценарии выкладки (reusable workflows GitHub Actions): `site.yml` — сайты (статика), `app.yml` — веб-сервисы и админки (Docker). Паспорт проекта — `publish.json`. Стандарты — «Публикация — стандарт», «Веб-сервис — стандарт».
 
 ## Версии
-Проекты вызывают сценарии по `@main` — тега `v1` в шаблонах нет с 23.10.2026: правка действует везде сразу, переносить тег не нужно. Предохранитель — `self-check.yml`: каждый PR в deploy-kit проходит `actionlint` по сценариям и шаблонам, PR из `claude/*` с зелёной проверкой сливается сам. Тег `v1` оставлен для старых копий и больше не двигается.
+Текущая версия — **2.0.0** (20.11.2026), журнал — `CHANGELOG.md`. Проекты вызывают сценарии по `@main` — тега `v1` в шаблонах нет с 23.10.2026: правка действует везде сразу. Поэтому каждая правка обратно совместима: старый `deploy.yml` без входа `target` работает как раньше. Предохранитель — `self-check.yml`: каждый PR в deploy-kit проходит `actionlint` по сценариям и шаблонам и проверку `target-build.mjs`, PR из `claude/*` с зелёной проверкой сливается сам. Тег `v1` оставлен для старых копий и больше не двигается.
+
+## Тест и прод параллельно (2.0.0)
+Каждый клиентский проект живёт на двух адресах: тест — поддомен `*.nikalimp.ru` на хостинге Ника (копия проекта у Ника, все обновления сначала там), прод — домен клиента.
+```
+PR claude/* ─► check ─► автослияние ─► test: сборка → закрыть от поисковиков → выкладка → проверка
+                                          └─ зелёная ─► prod: тот же коммит → сборка → выкладка → проверка
+                                          └─ красная ─► Telegram Нику, прод не трогается
+```
+- `publish.json` → `targets.test` / `targets.prod`: `url`, `ftp_dir_secret` (имя секрета папки), `indexable`. Нет `targets` — старое поле `url` и `FTP_DIR`, как раньше. Нет `targets.prod` (до запуска на домене) — выкладка на прод пропускается.
+- `site.yml`, вход `target: test | prod`. Перед сборкой — `SITE_URL` (боевой домен, если есть прод), `SITE_TARGET`, `SITE_INDEXABLE` и `NEXT_PUBLIC_*`. После `npm run check` — `shared/target-build.mjs`: тест получает `noindex,nofollow`, `robots.txt` с `Disallow: /`, `X-Robots-Tag`, без Метрики и верификаций; canonical — на боевой домен. Прод — обычный боевой сайт.
+- Проверка цели после выкладки: `/`, `sitemap.xml`, `robots.txt`, `llms.txt` — 200, несуществующая страница — 404, `noindex` есть на тесте и нет на проде.
+- FTP-логин и пароль общие (`FTP_HOST`, `FTP_USER`, `FTP_PASS`), папки разные: `FTP_DIR` (тест), `FTP_DIR_PROD` (прод). Нет секрета папки прода — прод пропускается, Нику — сообщение.
+- IndexNow, посты в каналы и PageSpeed идут с прода, а пока прода нет — с теста (IndexNow — только с индексируемой цели).
+- Выходы `site.yml`: `skipped`, `sha` (собранный коммит — по нему выкладывается прод), `url`.
+- Повтор или откат прода — `templates/deploy-prod.yml` (workflow_dispatch «Deploy prod», вход `sha`).
 
 ## Файлы
 | Файл | Куда идёт |
 |---|---|
 | `.github/workflows/site.yml` | в репозиторий `nikalimp/deploy-kit`, вызов `@main` |
-| `deploy.yml` | в проект: `.github/workflows/deploy.yml` (10 строк, вызов site.yml) |
-| `publish.json` | в корень проекта |
+| `templates/deploy.yml` | в проект: `.github/workflows/deploy.yml` — push в main: тест → проверка → прод тем же коммитом |
+| `templates/deploy-prod.yml` | в проект: `.github/workflows/deploy-prod.yml` — повтор или откат прода по `sha` |
+| `templates/publish.json` | в корень проекта: паспорт с `targets` |
+| `shared/target-build.mjs` | берётся `site.yml` из deploy-kit при каждой выкладке с `target` — сборка под цель |
 | `deploy-manual.sh` | в проект: `scripts/deploy-<app>.sh` — план 3, выкладка с Mac |
 | `.github/workflows/app.yml` | в `nikalimp/deploy-kit`, вызов `@main` — сервисы и админки |
 | `.github/workflows/pr.yml` | в `nikalimp/deploy-kit`, вызов `@main` — check и автослияние PR агента |
-| `templates/pr.yml` | в проект сайта: `.github/workflows/pr.yml` (check → слияние → site.yml) |
+| `templates/pr.yml` | в проект сайта: `.github/workflows/pr.yml` (check → слияние → тест → прод) |
 | `templates/app/pr-app.yml` | в проект сервиса: `.github/workflows/pr.yml` (check → слияние → app.yml) |
 | `templates/app/deploy-app.yml` | в проект сервиса: `.github/workflows/deploy.yml` |
 | `templates/app/compose.yml` | в проект: `deploy/compose.yml` (vps-compose) |
@@ -32,10 +49,12 @@
 
 ## Автослияние (pr.yml)
 ```
-claude/<задача> ─► PR ─► check ─► зелёный ─► слияние (GITHUB_TOKEN) ─► выкладка в том же запуске ─► не 200: агент открывает revert-PR
+claude/<задача> ─► PR ─► check ─► зелёный ─► слияние (GITHUB_TOKEN) ─► тест ─► прод в том же запуске ─► красная проверка: агент открывает revert-PR
 ```
-- Слияние токеном GITHUB_TOKEN не запускает deploy.yml, поэтому выкладка — job `deploy` в `pr.yml` проекта (`ref: main`).
-- Без автослияния: не `claude/*`, форк, черновик, метка `needs-nik`, правка путей `manual_paths` (по умолчанию `.github/`, `publish.json`) — метку ставит сам.
+- Апрува Ника нет (20.11.2026): любой PR агента из `claude/*` сливается сам после зелёного check — правки `.github/`, `publish.json`, удаление страниц, смена URL с 301, смена adapter. Метки `needs-nik` нет, вход `manual_paths` устарел и не используется.
+- Слияние токеном GITHUB_TOKEN не запускает deploy.yml, поэтому выкладка — jobs `test` и `prod` в `pr.yml` проекта.
+- Без автослияния — только не от агента: не `claude/*`, форк, черновик.
+- За Ником: секреты (вводит только он), новые репозитории и push в чужие репозитории — после его подтверждения.
 - Защиту ветки main с обязательным check не включаем: она запретит прямые коммиты статей и коммит медиа из Actions.
 - Итоги шагов (путь выкладки, каналы, реестр, ошибки check) — аннотации `::notice::`/`::warning::`/`::error::` и сводка запуска: их видно через REST check-runs, журналы — нет.
 
@@ -45,5 +64,5 @@ claude/<задача> ─► PR ─► check ─► зелёный ─► сли
 - `platform` — Timeweb Apps, Vercel Git: платформа собирает сама, сценарий ждёт health.
 
 ## Связи
-- Используют: `web:publish`, `web:update`, `web:new-service`, `web:new-admin`.
+- Используют: `website:publish`, `website:sync`, `website:new-site`, `website:transfer-site`, `website:new-service`, `website:new-admin`.
 - Вызывает в проекте: `media`, `site-channels`, `typograf` (prebuild сайта).

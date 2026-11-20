@@ -1,11 +1,13 @@
-# PR агента: проверка → автослияние → выкладка (deploy-kit pr.yml + site.yml). Стандарт — «Публикация — стандарт» §4.
-# Ветка claude/* с зелёным check сливается сама и сразу выкладывается этим же запуском:
-# слияние токеном GITHUB_TOKEN не запускает deploy.yml. Метка needs-nik или правка .github/ и publish.json — ждёт Ника.
-# Значения with: у job deploy — те же, что в deploy.yml (паспорт publish.json).
+# PR агента: проверка → автослияние → тест → проверка теста → прод тем же коммитом → проверка прода.
+# Стандарт — «Публикация — стандарт» §4 и «Тест и прод параллельно». deploy-kit 2.0.0.
+# Любой PR из claude/* с зелёным check сливается сам (апрува Ника нет) и сразу выкладывается этим же запуском:
+# слияние токеном GITHUB_TOKEN не запускает deploy.yml. Адреса и папки целей — publish.json → targets.
+# Нет targets.prod (до запуска на домене) — job prod пропускается сам. Ошибка → Telegram Нику (NOTIFY_*), прод не трогается.
+# Значения with у test и prod — те же, что в deploy.yml.
 name: PR
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
 concurrency: { group: "pr-${{ github.event.pull_request.number }}", cancel-in-progress: true }
 jobs:
   pr:
@@ -13,16 +15,29 @@ jobs:
     uses: nikalimp/deploy-kit/.github/workflows/pr.yml@main
     with:
       site_dir: "."
-  deploy:
+  test:
     needs: pr
     if: needs.pr.outputs.merged == 'true'
     concurrency: { group: deploy, cancel-in-progress: false }
     permissions: { contents: write }
     uses: nikalimp/deploy-kit/.github/workflows/site.yml@main
     with:
+      target: test
       ref: main
       adapter: ssh-ftp
       site_dir: "."
       out_dir: out
-      url: https://example.ru
+    secrets: inherit
+  prod:
+    needs: test
+    if: needs.test.outputs.skipped != 'true'
+    concurrency: { group: deploy, cancel-in-progress: false }
+    permissions: { contents: write }
+    uses: nikalimp/deploy-kit/.github/workflows/site.yml@main
+    with:
+      target: prod
+      ref: ${{ needs.test.outputs.sha }}   # ровно та сборка, что прошла проверку на тесте
+      adapter: ssh-ftp
+      site_dir: "."
+      out_dir: out
     secrets: inherit

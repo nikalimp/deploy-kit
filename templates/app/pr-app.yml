@@ -1,9 +1,10 @@
 # PR агента в сервисе или админке: проверка → автослияние → выкладка (deploy-kit pr.yml + app.yml).
+# Апрува Ника нет (20.11.2026): любой PR из claude/* с зелёным check сливается сам, миграции — тоже. Миграция должна быть обратимой.
 # Значения with: у job deploy — те же, что в deploy.yml сервиса.
 name: PR
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
 concurrency: { group: "pr-${{ github.event.pull_request.number }}", cancel-in-progress: true }
 jobs:
   pr:
@@ -11,7 +12,6 @@ jobs:
     uses: nikalimp/deploy-kit/.github/workflows/pr.yml@main
     with:
       site_dir: "."
-      manual_paths: ".github/ publish.json deploy/ drizzle/ prisma/migrations/"   # миграции базы — только с Ником
   deploy:
     needs: pr
     if: needs.pr.outputs.merged == 'true'

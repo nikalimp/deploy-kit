@@ -1,0 +1,21 @@
+{
+  "project": "<Клиент>",
+  "repo": "nikalimp/<клиент>",
+  "site_dir": ".",
+  "targets": {
+    "test": { "url": "https://<клиент>.nikalimp.ru", "ftp_dir_secret": "FTP_DIR", "indexable": false },
+    "prod": { "url": "https://<домен>", "ftp_dir_secret": "FTP_DIR_PROD", "indexable": true }
+  },
+  "url": "https://<клиент>.nikalimp.ru",
+  "adapter": "ssh-ftp",
+  "mode": "auto",
+  "content_dir": "content",
+  "factory": "content/factory/content.config.json",
+  "schedule": { "daily": "09:05", "weekly": "mon 08:50", "tz": "Europe/Moscow", "days": "1-5" },
+  "version": 2,
+  "notes": "targets — тест (поддомен Ника, закрыт от поисковиков, копия проекта у Ника) и прод (домен клиента). До запуска на домене — только targets.test. url — старое поле для deploy-kit до 2.0.0: адрес теста. mode: auto — статьи в main, pr — через PR с автослиянием",
+  "out_dir": "out",
+  "app_path": "",
+  "rsync_exclude": "",
+  "manual_script": "scripts/deploy-site.sh"
+}

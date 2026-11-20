@@ -1,0 +1,42 @@
+# Выкладка после push в main (статьи контент-завода, ручные коммиты): тест → проверка теста → прод тем же коммитом.
+# Стандарт — «Публикация — стандарт», «Тест и прод параллельно». deploy-kit 2.0.0.
+# Адреса и папки — publish.json → targets: test (поддомен *.nikalimp.ru, закрыт от поисковиков) и prod (домен клиента).
+# Секреты (Settings → Secrets and variables → Actions): FTP_HOST, FTP_USER, FTP_PASS — общие;
+#   FTP_DIR — папка теста (www/<проект>.nikalimp.ru/), FTP_DIR_PROD — папка прода (www/<домен>/);
+#   NOTIFY_BOT_TOKEN, NOTIFY_CHAT_ID — ошибки Нику. SSH из Actions на REG.RU закрыт — выкладка идёт по FTP.
+# Нет targets.prod — job prod пропускается сам. Без targets вообще — тест выкладывается по url и FTP_DIR, как до 2.0.0.
+name: Deploy
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["specs/**", "*.md", "content/factory/**"]
+  workflow_dispatch: {}
+concurrency: { group: deploy, cancel-in-progress: false }
+jobs:
+  test:
+    # без этой строки запуск падает со startup_failure: сценарий коммитит медиа обратно в репозиторий
+    permissions: { contents: write }
+    uses: nikalimp/deploy-kit/.github/workflows/site.yml@main
+    with:
+      target: test
+      adapter: ssh-ftp            # ssh-ftp | ftp | s3 | manual-zip | tilda
+      site_dir: "."               # монорепо: apps/site
+      out_dir: out                # Vite: dist
+      app_path: ""                # приложение в подпапке сайта: "test/app/"
+      rsync_exclude: ""           # подпапки других приложений и файлы только на сервере: "test/ api/config.php api/logs/"
+      # media_brand: путь к brand.json от site_dir. По умолчанию content/factory/brand.json
+    secrets: inherit
+  prod:
+    needs: test
+    if: needs.test.outputs.skipped != 'true'
+    permissions: { contents: write }
+    uses: nikalimp/deploy-kit/.github/workflows/site.yml@main
+    with:
+      target: prod
+      ref: ${{ needs.test.outputs.sha }}   # ровно та сборка, что прошла проверку на тесте
+      adapter: ssh-ftp
+      site_dir: "."
+      out_dir: out
+      app_path: ""
+      rsync_exclude: ""
+    secrets: inherit

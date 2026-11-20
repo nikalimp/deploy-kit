@@ -2,7 +2,7 @@
 # поэтому любая правка здесь сразу действует во всех проектах. Предохранитель — этот workflow:
 #   PR ─► actionlint по .github/workflows и templates ─► зелёный ─► PR из claude/* сливается сам ─► действует везде
 #                                                   └─ красный ─► чинить в той же ветке
-# Прямой push в main — только Ник.
+# Апрува Ника нет (20.11.2026): PR из claude/* с зелёным actionlint сливается сам.
 name: self-check
 
 on:
@@ -23,13 +23,28 @@ jobs:
         run: |
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 /tmp
           # шаблоны проектов проверяем как обычные workflow
-          mkdir -p /tmp/t/.github/workflows && git init -q /tmp/t && cp templates/pr.yml templates/app/deploy-app.yml templates/app/pr-app.yml /tmp/t/.github/workflows/
+          mkdir -p /tmp/t/.github/workflows && git init -q /tmp/t && cp templates/pr.yml templates/deploy.yml templates/deploy-prod.yml templates/data.yml templates/app/deploy-app.yml templates/app/pr-app.yml /tmp/t/.github/workflows/
           # ошибки — аннотациями: журналы Actions из облачной сессии не читаются
           # shellcheck disable=SC2016
           F='{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}}::{{$err.Message}}\n{{end}}'
           /tmp/actionlint -format "$F" .github/workflows/*.yml
           (cd /tmp/t && /tmp/actionlint -format "$F")
           echo "- ✓ actionlint: сценарии и шаблоны" >> "$GITHUB_STEP_SUMMARY"
+      - name: target-build — тест закрыт, прод открыт
+        run: |
+          # маленькая сборка-образец: проверяем, что тест получает noindex и Disallow, а прод — нет
+          for t in test prod; do
+            d="/tmp/out-$t"; mkdir -p "$d"
+            printf '<html><head><meta name="robots" content="index, follow"/><link rel="canonical" href="https://x.nikalimp.ru/"/><script>ym(1,"init",{})</script></head><body>ok</body></html>' > "$d/index.html"
+            printf 'User-agent: *\nAllow: /\n' > "$d/robots.txt"
+            idx=false; [ "$t" = prod ] && idx=true
+            node shared/target-build.mjs --out "$d" --target "$t" --indexable "$idx" --site-url https://x.ru --alias https://x.nikalimp.ru
+          done
+          grep -q 'noindex' /tmp/out-test/index.html && grep -q '^Disallow: /$' /tmp/out-test/robots.txt && ! grep -q 'ym(' /tmp/out-test/index.html \
+            || { echo "::error::target-build: тест не закрыт от поисковиков"; exit 1; }
+          ! grep -q 'noindex' /tmp/out-prod/index.html && grep -q 'href="https://x.ru/"' /tmp/out-prod/index.html \
+            || { echo "::error::target-build: прод закрыт или canonical не на боевой домен"; exit 1; }
+          echo "- ✓ target-build: тест закрыт, прод открыт, canonical на боевой домен" >> "$GITHUB_STEP_SUMMARY"
 
   merge:
     needs: check
@@ -37,8 +52,7 @@ jobs:
     if: >-
       startsWith(github.head_ref, 'claude/') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      !github.event.pull_request.draft &&
-      !contains(github.event.pull_request.labels.*.name, 'needs-nik')
+      !github.event.pull_request.draft
     permissions:
       contents: write
       pull-requests: write
