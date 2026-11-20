@@ -40,10 +40,12 @@ jobs:
             idx=false; [ "$t" = prod ] && idx=true
             node shared/target-build.mjs --out "$d" --target "$t" --indexable "$idx" --site-url https://x.ru --alias https://x.nikalimp.ru
           done
-          grep -q 'noindex' /tmp/out-test/index.html && grep -q '^Disallow: /$' /tmp/out-test/robots.txt && ! grep -q 'ym(' /tmp/out-test/index.html \
-            || { echo "::error::target-build: тест не закрыт от поисковиков"; exit 1; }
-          ! grep -q 'noindex' /tmp/out-prod/index.html && grep -q 'href="https://x.ru/"' /tmp/out-prod/index.html \
-            || { echo "::error::target-build: прод закрыт или canonical не на боевой домен"; exit 1; }
+          if ! grep -q 'noindex' /tmp/out-test/index.html || ! grep -q '^Disallow: /$' /tmp/out-test/robots.txt || grep -q 'ym(' /tmp/out-test/index.html; then
+            echo "::error::target-build: тест не закрыт от поисковиков"; exit 1
+          fi
+          if grep -q 'noindex' /tmp/out-prod/index.html || ! grep -q 'href="https://x.ru/"' /tmp/out-prod/index.html; then
+            echo "::error::target-build: прод закрыт или canonical не на боевой домен"; exit 1
+          fi
           echo "- ✓ target-build: тест закрыт, прод открыт, canonical на боевой домен" >> "$GITHUB_STEP_SUMMARY"
 
   merge:

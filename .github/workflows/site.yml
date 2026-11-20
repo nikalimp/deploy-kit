@@ -128,6 +128,7 @@ jobs:
           ADAPTER: ${{ inputs.adapter }}
           ALL: ${{ toJSON(secrets) }}
         run: |
+          # shellcheck disable=SC2016
           node -e '
             const fs=require("fs"), out=[], set=(k,v)=>out.push(`${k}=${v}`);
             const t=process.env.TARGET, secrets=JSON.parse(process.env.ALL||"{}"), has=n=>!!(secrets[n]||"").trim();
@@ -199,6 +200,7 @@ jobs:
           FTP_NAME: ${{ needs.plan.outputs.ftp_secret }}
           SSH_NAME: ${{ needs.plan.outputs.ssh_secret }}
         run: |
+          # shellcheck disable=SC2016
           node -e '
             const a=JSON.parse(process.env.ALL||"{}"), v=n=>String(a[n]||"").trim();
             require("fs").appendFileSync(process.env.GITHUB_ENV,`TARGET_FTP_DIR=${v(process.env.FTP_NAME)}\nTARGET_SITE_DIR=${v(process.env.SSH_NAME)}\n`);
