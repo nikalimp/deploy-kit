@@ -1,0 +1,19 @@
+# Повтор или откат прода: выкладка выбранного коммита на прод без теста. Actions → «Deploy prod» → Run workflow → sha.
+# Пустой sha — текущий main. Откат — sha прошлого зелёного запуска (его видно в сводке job prod). deploy-kit 2.0.0.
+name: Deploy prod
+on:
+  workflow_dispatch:
+    inputs:
+      sha: { description: "Коммит для прода (пусто — текущий main)", required: false, default: "" }
+concurrency: { group: deploy, cancel-in-progress: false }
+jobs:
+  prod:
+    permissions: { contents: write }
+    uses: nikalimp/deploy-kit/.github/workflows/site.yml@main
+    with:
+      target: prod
+      ref: ${{ inputs.sha }}
+      adapter: ssh-ftp
+      site_dir: "."
+      out_dir: out
+    secrets: inherit
